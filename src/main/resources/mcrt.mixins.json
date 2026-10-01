@@ -4,6 +4,7 @@
 	"compatibilityLevel": "JAVA_21",
 	"client": [
 		"CloudRendererMixin",
+		"EntityRendererMixin",
 		"FrontendGpuDeviceAccessor",
 		"GameRendererMixin",
 		"LevelExtractorMixin",
@@ -11,6 +12,7 @@
 		"RenderSectionMixin",
 		"SectionCompileTaskMixin",
 		"SectionRegionLightingMixin",
+		"StagedDrawMixin",
 		"VulkanFeatureSetsMixin"
 	],
 	"injectors": {

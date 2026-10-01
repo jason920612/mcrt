@@ -284,6 +284,23 @@ void SectionManager::enqueueFarTerrain(int32_t originX, int32_t originZ, uint32_
     farZ_ = sz;
 }
 
+uint32_t SectionManager::reserveSlot() {
+    return allocateSlot(0);
+}
+
+void SectionManager::writeSlotInfo(uint32_t slot, VkDeviceAddress vertexAddress) {
+    SectionInfoGpu info{};
+    info.vertexAddress = vertexAddress;
+    info.cutoutFirstVertex = ~0u;
+    info.translucentFirstVertex = ~0u;
+    ctx_.writeBuffer(infoBuffer_, &info, sizeof(info), VkDeviceSize(slot) * sizeof(info));
+}
+
+VkDeviceAddress SectionManager::quadIndexAddress(uint32_t quads, uint64_t retireValue) {
+    ensureQuadIndices(quads, retireValue);
+    return quadIndices_.address;
+}
+
 bool SectionManager::hasFarTerrain() const {
     for (const auto& [k, section] : resident_)
         if (section.y == kFarSectionY)

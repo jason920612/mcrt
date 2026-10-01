@@ -4,6 +4,7 @@
 #include "denoiser.h"
 #include "material_store.h"
 #include "temporal_upscaler.h"
+#include "entity_layer.h"
 #include "mcrt/api.h"
 #include "section_manager.h"
 #include "vk_context.h"
@@ -22,6 +23,7 @@ public:
     Renderer& operator=(const Renderer&) = delete;
 
     SectionManager& sections() { return *sections_; }
+    EntityLayer& entities() { return *entities_; }
     MaterialStore& materials() { return *materials_; }
     McrtStats stats() const;
 
@@ -99,8 +101,11 @@ private:
     uint32_t tlasInstanceCount_ = 0;
 
     std::unique_ptr<Denoiser> denoiser_; // owns the G-buffer and the composed HDR image
-    std::unique_ptr<TemporalUpscaler> upscaler_; // TAA/upscale to output resolution, final image + depth
+    std::unique_ptr<TemporalUpscaler> upscaler_;
+    std::unique_ptr<EntityLayer> entities_; // TAA/upscale to output resolution, final image + depth
     std::array<Buffer, 2> reservoirs_{}; // ReSTIR reservoirs (pathtrace.slang), ping-pong
+    uint32_t currentSlot_ = 0;
+    bool entitiesThisFrame_ = false;
     uint32_t reservoirIndex_ = 0;
     bool reservoirsNeedClear_ = false;
     Buffer depth_;                       // float per pixel, copied into the D32 depth target

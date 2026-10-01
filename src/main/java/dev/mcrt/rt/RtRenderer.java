@@ -63,6 +63,13 @@ public final class RtRenderer {
 	private long statsWindowStart = System.nanoTime();
 	private int statsWindowFrames;
 
+	private static volatile float[] keyLight;
+
+	/** Direction towards the sun (or the moon at night) of the last frame, or null when neither lights the world. */
+	public static float[] keyLightDirection() {
+		return keyLight;
+	}
+
 	public static RtRenderer get() {
 		return INSTANCE;
 	}
@@ -172,6 +179,12 @@ public final class RtRenderer {
 		int blockZ = (int) Math.floor(camera.pos.z);
 		if (FAR_TERRAIN) {
 			farTerrain.update(this, camera.pos.x, camera.pos.z);
+		}
+		int[] entityVertices = new int[1];
+		float[] entityPositions = EntityCapture.take(blockX, blockY, blockZ, entityVertices);
+		try (Arena arena = Arena.ofConfined()) {
+			bridge.entities(ctx, entityVertices[0] == 0 ? MemorySegment.NULL : arena.allocateFrom(JAVA_FLOAT, entityPositions),
+				entityVertices[0]);
 		}
 
 		input.set(JAVA_LONG, NativeBridge.OFF_COLOR_IMAGE, color.vkImage());
@@ -288,6 +301,8 @@ public final class RtRenderer {
 		float sunIntensity = smoothstep(-0.05f, 0.12f, sun.y);
 		float moonIntensity = smoothstep(-0.05f, 0.12f, moon.y) * (1f - sunIntensity);
 		putVec4(NativeBridge.OFF_SUN_DIR, sun.x, sun.y, sun.z, sunIntensity);
+		keyLight = sunIntensity > 0.05f ? new float[] {sun.x, sun.y, sun.z}
+			: moonIntensity > 0.05f ? new float[] {moon.x, moon.y, moon.z} : null;
 		putVec4(NativeBridge.OFF_MOON_DIR, moon.x, moon.y, moon.z, moonIntensity);
 		if (sky.skyColor != null) {
 			putVec4(NativeBridge.OFF_SKY_COLOR, sky.skyColor.x(), sky.skyColor.y(), sky.skyColor.z(), 1f);

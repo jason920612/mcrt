@@ -75,6 +75,7 @@ Renderer::Renderer(std::unique_ptr<VkContext> context) : ctx_(std::move(context)
     sections_ = std::make_unique<SectionManager>(*ctx_, deletion_);
     denoiser_ = std::make_unique<Denoiser>(*ctx_, deletion_);
     upscaler_ = std::make_unique<TemporalUpscaler>(*ctx_, deletion_);
+    entities_ = std::make_unique<EntityLayer>(*ctx_, deletion_, *sections_);
     materials_ = std::make_unique<MaterialStore>(*ctx_, deletion_);
 
     VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
@@ -252,6 +253,7 @@ Renderer::~Renderer() {
     ctx_->destroyBuffer(tlasScratch_);
     denoiser_.reset();
     upscaler_.reset();
+    entities_.reset();
     materials_.reset();
     ctx_->destroyImage(skyView_);
     ctx_->destroyImage(cloudView_);
@@ -525,6 +527,8 @@ void Renderer::recordTlasBuild(VkCommandBuffer cmd, FrameSlot& slot, const McrtF
                                uint64_t retireValue) {
     instanceScratch_.clear();
     sections_->appendInstances(instanceScratch_, input.camera_block_pos);
+    if (entitiesThisFrame_)
+        instanceScratch_.push_back(entities_->instance(currentSlot_));
     const uint32_t count = static_cast<uint32_t>(instanceScratch_.size());
 
     if (slot.instanceCapacity < std::max(count, 1u)) {
@@ -712,6 +716,13 @@ bool Renderer::renderFrame(const McrtFrameInput& input, McrtFrameOutput& output)
                   VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
                   VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
                   VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR);
+    currentSlot_ = slotIndex;
+    entitiesThisFrame_ = entities_->record(cmd, slotIndex, retireValue);
+    if (entitiesThisFrame_)
+        memoryBarrier(cmd, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                      VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
+                      VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                      VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR);
     recordTlasBuild(cmd, slot, input, retireValue);
     memoryBarrier(cmd, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
                   VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,

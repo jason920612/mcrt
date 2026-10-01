@@ -16,6 +16,8 @@ static const uint RAY_TYPE_COUNT = 2;
 
 static const uint MASK_OPAQUE = 0x01;      // solid + cutout instances
 static const uint MASK_TRANSLUCENT = 0x02;
+static const uint MASK_ENTITY = 0x04;      // mobs, players, items: shadows, reflections, bounces only
+static const uint MASK_PRIMARY = 0xFF & ~MASK_ENTITY; // Minecraft draws entities itself
 
 static const float PI = 3.14159265;
 
@@ -73,6 +75,7 @@ static const uint VERTEX_CARD = 4;     // vertex light word: vegetation card (se
 static const uint VERTEX_TERRAIN = 8;  // natural terrain
 static const uint VERTEX_FAR = 16;     // far landscape heightfield (past render distance)
 static const uint VERTEX_FAR_WATER = 32;
+static const uint VERTEX_ENTITY = 64;  // entity geometry (entity_layer.cpp)
 [[vk::binding(13, 0)]] Texture2DArray<float4> materialAlbedo; // sRGB view: rgb linear base color, a = height
 [[vk::binding(14, 0)]] Texture2DArray<float4> materialNormal; // BC5: normal xy (OpenGL convention)
 [[vk::binding(15, 0)]] SamplerState materialSampler;
@@ -513,6 +516,13 @@ SurfaceSample fetchSurface(BuiltInTriangleIntersectionAttributes attribs, uint f
     s.roughness = 0.9;
     s.materialId = 0;
     s.emission = float((v0.light >> 12) & 0xF) / 15.0;
+    if ((v0.light & VERTEX_ENTITY) != 0)
+    {
+        s.albedo = pow(unpackColor(v0.color).rgb, 2.2);
+        s.alpha = 1.0;
+        s.roughness = 0.8;
+        return s;
+    }
     if ((v0.light & VERTEX_FAR) != 0)
     {
         // Far landscape: only past the loaded chunks (inside them it would cover the real world).
@@ -761,7 +771,7 @@ bool traceShadow(float3 origin, float3 dir, float maxT)
     ShadowPayload shadow;
     shadow.visible = 0;
     TraceRay(scene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER,
-             MASK_OPAQUE, RAY_SHADOW, RAY_TYPE_COUNT, 1, ray, shadow);
+             MASK_OPAQUE | MASK_ENTITY, RAY_SHADOW, RAY_TYPE_COUNT, 1, ray, shadow);
     return shadow.visible != 0;
 }
 
@@ -966,7 +976,7 @@ float3 surfaceIllumination(float3 pos, Payload hit, KeyLight light, inout uint s
 
     float3 bounceDir = cosineSampleHemisphere(hit.normal, seed);
     float3 bounceOrigin = pos + hit.geometricNormal * 0.002;
-    Payload bounce = tracePrimary(bounceOrigin, bounceDir, MASK_OPAQUE, 0.0);
+    Payload bounce = tracePrimary(bounceOrigin, bounceDir, MASK_OPAQUE | MASK_ENTITY, 0.0);
     // Cosine-weighted sampling: the pdf cancels the cosine and 1/pi of the Lambertian BRDF.
     if (bounce.hitT < 0.0)
         illumination += skyRadiance(bounceDir, false);
@@ -1060,7 +1070,7 @@ void rayGen()
     }
     for (uint layer = 0; layer < 4 && !layerLimitReached; ++layer)
     {
-        Payload hit = tracePrimary(origin, dir, 0xFF, tMin);
+        Payload hit = tracePrimary(origin, dir, MASK_PRIMARY, tMin);
         bool fromWater = inWater;
         if (inWater)
         {
@@ -1106,7 +1116,7 @@ void rayGen()
             if (!fromWater)
                 reflected.y = abs(reflected.y);
             float3 reflectOrigin = pos + hit.geometricNormal * 0.01;
-            Payload r = tracePrimary(reflectOrigin, reflected, MASK_OPAQUE, 0.0);
+            Payload r = tracePrimary(reflectOrigin, reflected, MASK_OPAQUE | MASK_ENTITY, 0.0);
             float3 reflection;
             if (r.hitT < 0.0)
                 reflection = skyWithClouds(reflectOrigin, reflected, false);

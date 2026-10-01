@@ -63,6 +63,7 @@ final class NativeBridge {
 	private final MethodHandle sectionRemove;
 	private final MethodHandle sectionsClear;
 	private final MethodHandle farTerrain;
+	private final MethodHandle entities;
 	private final MethodHandle getStats;
 	private final MethodHandle materialUpload;
 	private final MethodHandle destroy;
@@ -81,6 +82,8 @@ final class NativeBridge {
 			FunctionDescriptor.ofVoid(ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT));
 		this.sectionsClear = linker.downcallHandle(lib.findOrThrow("mcrt_sections_clear"),
 			FunctionDescriptor.ofVoid(ADDRESS));
+		this.entities = linker.downcallHandle(lib.findOrThrow("mcrt_entities"),
+			FunctionDescriptor.ofVoid(ADDRESS, ADDRESS, JAVA_INT));
 		this.farTerrain = linker.downcallHandle(lib.findOrThrow("mcrt_far_terrain"),
 			FunctionDescriptor.ofVoid(ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, ADDRESS, ADDRESS));
 		this.materialUpload = linker.downcallHandle(lib.findOrThrow("mcrt_material_upload"),
@@ -147,6 +150,14 @@ final class NativeBridge {
 	void sectionsClear(MemorySegment ctx) {
 		try {
 			sectionsClear.invokeExact(ctx);
+		} catch (Throwable t) {
+			throw new RuntimeException(t);
+		}
+	}
+
+	void entities(MemorySegment ctx, MemorySegment positions, int vertexCount) {
+		try {
+			entities.invokeExact(ctx, positions, vertexCount);
 		} catch (Throwable t) {
 			throw new RuntimeException(t);
 		}

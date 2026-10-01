@@ -35,6 +35,19 @@ public abstract class LevelRendererMixin {
 	@Shadow @Final private LevelRenderState levelRenderState;
 	@Shadow @Final private GameRenderer gameRenderer;
 
+	// Entity meshes are built in prepareFrame; capture those of the level (not the GUI's).
+	@Inject(method = "render", at = @At(value = "INVOKE",
+		target = "Lnet/minecraft/client/renderer/feature/FeatureRenderDispatcher;prepareFrame(Lnet/minecraft/client/renderer/SubmitNodeStorage;)Lnet/minecraft/client/renderer/feature/FeatureRenderDispatcher$PreparedFrame;"))
+	private void mcrt$beginEntityCapture(CallbackInfo ci) {
+		dev.mcrt.rt.EntityCapture.begin(levelRenderState.cameraRenderState.pos);
+	}
+
+	@Inject(method = "render", at = @At(value = "INVOKE", shift = At.Shift.AFTER,
+		target = "Lnet/minecraft/client/renderer/feature/FeatureRenderDispatcher;prepareFrame(Lnet/minecraft/client/renderer/SubmitNodeStorage;)Lnet/minecraft/client/renderer/feature/FeatureRenderDispatcher$PreparedFrame;"))
+	private void mcrt$endEntityCapture(CallbackInfo ci) {
+		dev.mcrt.rt.EntityCapture.end();
+	}
+
 	@Inject(method = "addMainPass", at = @At("HEAD"))
 	private void mcrt$addPathTracePass(FrameGraphBuilder frame, FeatureRenderDispatcher.PreparedFrame featureFrame,
 			GpuBufferSlice terrainFog, ChunkSectionsToRender chunkSectionsToRender, boolean consistentDepthRequired,

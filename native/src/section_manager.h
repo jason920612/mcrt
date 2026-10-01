@@ -59,6 +59,12 @@ public:
     void enqueueFarTerrain(int32_t originX, int32_t originZ, uint32_t size, uint32_t spacing, int32_t seaLevel,
                            const float* heights, const uint32_t* colors);
     bool hasFarTerrain() const;
+
+    // A section-info slot for geometry managed elsewhere (entities); never freed.
+    uint32_t reserveSlot();
+    void writeSlotInfo(uint32_t slot, VkDeviceAddress vertexAddress);
+    // The shared quad index buffer (0,1,2, 2,3,0 per quad), grown to at least `quads`.
+    VkDeviceAddress quadIndexAddress(uint32_t quads, uint64_t retireValue);
     // Changes whenever the light lists are rebuilt (light indices and contents change).
     uint32_t lightGeneration() const { return lightGeneration_; }
 

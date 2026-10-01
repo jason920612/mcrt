@@ -53,6 +53,7 @@ add_library(mcrt_native SHARED
     src/api.cpp
     src/bevel.cpp
     src/denoiser.cpp
+    src/entity_layer.cpp
     src/material_store.cpp
     src/renderer.cpp
     src/section_manager.cpp
