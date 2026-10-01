@@ -55,7 +55,8 @@ void temporalAccumulate(uint3 id : SV_DispatchThreadID)
     uint prev = 1 - cur;
 
     float4 position = positions[p];
-    float3 illumination = noisyIllumination[p].rgb;
+    float4 noisy = noisyIllumination[p];
+    float3 illumination = noisy.rgb;
     if (position.w == 0.0)
     {
         history[cur][p] = 0.0;
@@ -64,6 +65,26 @@ void temporalAccumulate(uint3 id : SV_DispatchThreadID)
         return;
     }
     float3 normal = normals[cur][p].xyz;
+    if (noisy.w == 0.0)
+    {
+        // Not lit this frame (checkerboard): reconstruct from the lit neighbors on the same surface.
+        float3 sum = 0.0;
+        float count = 0.0;
+        const int2 offsets[4] = { int2(1, 0), int2(-1, 0), int2(0, 1), int2(0, -1) };
+        for (int i = 0; i < 4; ++i)
+        {
+            int2 q = p + offsets[i];
+            if (!inside(q) || positions[q].w == 0.0)
+                continue;
+            float4 neighbor = noisyIllumination[q];
+            if (neighbor.w == 0.0 || dot(normals[cur][q].xyz, normal) < 0.9
+                || abs(dot(normal, positions[q].xyz - position.xyz)) > 0.1)
+                continue;
+            sum += neighbor.rgb;
+            count += 1.0;
+        }
+        illumination = count > 0.0 ? sum / count : illumination;
+    }
 
     // Where was this surface point on screen last frame?
     float3 prevRelative = position.xyz + frame.prevCameraShift.xyz;
@@ -124,8 +145,9 @@ void temporalAccumulate(uint3 id : SV_DispatchThreadID)
         {
             for (int dx = -1; dx <= 1; ++dx)
             {
-                int2 q = p + int2(dx, dy) * 2;
-                if (!inside(q) || positions[q].w == 0.0 || dot(normals[cur][q].xyz, normal) < 0.9)
+                int2 q = p + int2(dx * 2 + (dy & 1), dy); // mixes both checkerboard parities
+                if (!inside(q) || positions[q].w == 0.0 || noisyIllumination[q].w == 0.0
+                    || dot(normals[cur][q].xyz, normal) < 0.9)
                     continue;
                 float l = luminance(noisyIllumination[q].rgb);
                 spatialMoments += float2(l, l * l);

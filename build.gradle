@@ -86,6 +86,12 @@ loom {
 				vmArgs "-Dmcrt.devTime=${project.property('mcrtDevTime')}"
 			}
 			// -PmcrtDevCommands="setblock ~ ~ ~3 glowstone;..." runs server commands once after joining
+			if (project.hasProperty('mcrtDisable')) {
+				vmArgs "-Dmcrt.disable=true"
+			}
+			if (project.hasProperty('mcrtCheckerboard')) {
+				vmArgs "-Dmcrt.checkerboard=${project.property('mcrtCheckerboard')}"
+			}
 			if (project.hasProperty('mcrtDevSpin')) {
 				vmArgs "-Dmcrt.devSpin=${project.property('mcrtDevSpin')}"
 			}

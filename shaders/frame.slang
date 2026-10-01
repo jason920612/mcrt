@@ -13,12 +13,24 @@ struct FrameUniforms
     float4 moonDir;          // xyz towards the moon, w = intensity
     float4 skyColor;         // rgb
     float4 params;           // x = time, y = pixel spread angle, z = debug mode, w = rain
-    uint4 frameInfo;         // x = frame index, y = width, z = height
+    uint4 frameInfo;         // x = frame index, y = width, z = height, w = flags (see FLAG_*)
     int4 cameraBlock;        // camera block position (absolute)
     float4 prevViewProj[4];  // last frame's viewProj (columns)
     float4 prevCameraShift;  // block-relative position + this = position relative to last frame's camera
     float4 atmosphere;       // x = cloud layer base (absolute y)
 };
+
+static const uint SKY_OVERWORLD = 0;
+static const uint SKY_NONE = 1;              // Nether: no sun, no clouds
+static const uint SKY_END = 2;
+static const uint FLAG_CAMERA_IN_WATER = 4;
+static const uint FLAG_CAMERA_IN_LAVA = 8;
+static const uint FLAG_CHECKERBOARD_LIGHTING = 16; // light half the pixels per frame, alternating
+
+uint skyType(FrameUniforms f)
+{
+    return f.frameInfo.w & 3;
+}
 
 float4 transformColumns(float4 columns[4], float4 v)
 {

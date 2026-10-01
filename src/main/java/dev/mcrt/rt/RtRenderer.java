@@ -36,6 +36,8 @@ public final class RtRenderer {
 	private static final long VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT = 0x00010000L;
 	private static final RtRenderer INSTANCE = new RtRenderer();
 	private static final int DEBUG_MODE = Integer.getInteger("mcrt.debug", 0);
+	/** Light half the pixels per frame (alternating) and let the denoiser fill in; -Dmcrt.checkerboard=false to disable. */
+	private static final boolean CHECKERBOARD = !"false".equals(System.getProperty("mcrt.checkerboard"));
 
 	private enum State { UNINITIALIZED, READY, DISABLED }
 
@@ -165,12 +167,17 @@ public final class RtRenderer {
 		input.set(JAVA_INT, NativeBridge.OFF_CAMERA_BLOCK_POS, blockX);
 		input.set(JAVA_INT, NativeBridge.OFF_CAMERA_BLOCK_POS + 4, blockY);
 		input.set(JAVA_INT, NativeBridge.OFF_CAMERA_BLOCK_POS + 8, blockZ);
-		input.set(JAVA_INT, NativeBridge.OFF_FLAGS, 0);
+		input.set(JAVA_INT, NativeBridge.OFF_FLAGS, frameFlags(level));
 		putVec4(NativeBridge.OFF_CAMERA_OFFSET,
 			(float) (camera.pos.x - blockX), (float) (camera.pos.y - blockY), (float) (camera.pos.z - blockZ), 0f);
 		putMatrix(NativeBridge.OFF_VIEW_PROJ, viewProj);
 		putMatrix(NativeBridge.OFF_INV_VIEW_PROJ, invViewProj);
 		putSky(level.skyRenderState);
+		if (level.skyRenderState.skybox != net.minecraft.world.level.dimension.DimensionType.Skybox.OVERWORLD
+			&& camera.fogData != null && camera.fogData.color != null) {
+			// Dimensions without a sky: their fog color stands in for the light from "outside".
+			putVec4(NativeBridge.OFF_SKY_COLOR, camera.fogData.color.x, camera.fogData.color.y, camera.fogData.color.z, 1f);
+		}
 		input.set(JAVA_FLOAT, NativeBridge.OFF_TIME, (System.nanoTime() - startNanos) * 1e-9f);
 		// Angle one pixel subtends at the screen center; drives texture LOD selection.
 		Matrix4f projection = hasLevelProjection ? levelProjection : camera.projectionMatrix;
@@ -196,6 +203,18 @@ public final class RtRenderer {
 		);
 	}
 
+	/** Vanilla-comparison runs (-Dmcrt.disable) still log frame rate. */
+	public static void logVanillaFps() {
+		INSTANCE.statsWindowFrames++;
+		long now = System.nanoTime();
+		if (now - INSTANCE.statsWindowStart >= 5_000_000_000L) {
+			McrtClient.LOGGER.info("[vanilla] fps={}", String.format("%.1f",
+				INSTANCE.statsWindowFrames / ((now - INSTANCE.statsWindowStart) * 1e-9)));
+			INSTANCE.statsWindowStart = now;
+			INSTANCE.statsWindowFrames = 0;
+		}
+	}
+
 	private void logStatsPeriodically() {
 		statsWindowFrames++;
 		long now = System.nanoTime();
@@ -203,9 +222,10 @@ public final class RtRenderer {
 			return;
 		}
 		bridge.getStats(ctx, stats);
-		McrtClient.LOGGER.info("[stats] fps={} gpuPass={}ms sections={} pending={} instances={} lights={}",
+		McrtClient.LOGGER.info("[stats] fps={} gpuPass={}ms nativeCpu={}ms lightRebuild={}ms sections={} pending={} instances={} lights={}",
 			String.format("%.1f", statsWindowFrames / ((now - statsWindowStart) * 1e-9)),
 			String.format("%.2f", stats.get(JAVA_FLOAT, 16)),
+			String.format("%.2f", stats.get(JAVA_FLOAT, 24)), String.format("%.2f", stats.get(JAVA_FLOAT, 28)),
 			stats.get(JAVA_INT, 0), stats.get(JAVA_INT, 4), stats.get(JAVA_INT, 8), stats.get(JAVA_INT, 20));
 		McrtClient.LOGGER.info("[sky] sun=({}, {}, {}, i={}) moon=({}, {}, {}, i={}) skyColor=({}, {}, {}) rain={}",
 			input.get(JAVA_FLOAT, NativeBridge.OFF_SUN_DIR), input.get(JAVA_FLOAT, NativeBridge.OFF_SUN_DIR + 4),
@@ -216,6 +236,24 @@ public final class RtRenderer {
 			input.get(JAVA_FLOAT, NativeBridge.OFF_SKY_COLOR + 8), input.get(JAVA_FLOAT, NativeBridge.OFF_RAIN));
 		statsWindowStart = now;
 		statsWindowFrames = 0;
+	}
+
+	// Bits 0-1 sky type (0 overworld, 1 none/Nether, 2 End); bit 2 camera in water; bit 3 camera in lava;
+	// bit 4 checkerboard lighting.
+	private static int frameFlags(LevelRenderState level) {
+		int flags = CHECKERBOARD ? 16 : 0;
+		flags |= switch (level.skyRenderState.skybox) {
+			case OVERWORLD -> 0;
+			case END -> 2;
+			default -> 1;
+		};
+		net.minecraft.world.level.material.FogType fog = level.cameraRenderState.fogType;
+		if (fog == net.minecraft.world.level.material.FogType.WATER) {
+			flags |= 4;
+		} else if (fog == net.minecraft.world.level.material.FogType.LAVA) {
+			flags |= 8;
+		}
+		return flags;
 	}
 
 	private void putSky(SkyRenderState sky) {
@@ -256,6 +294,10 @@ public final class RtRenderer {
 	}
 
 	private void initialize() {
+		if (Boolean.getBoolean("mcrt.disable")) {
+			disable("disabled by -Dmcrt.disable (vanilla rendering for comparison)");
+			return;
+		}
 		if (!(RenderSystem.getDevice() instanceof FrontendGpuDeviceAccessor frontend)
 			|| !(frontend.mcrt$getBackend() instanceof VulkanDevice vulkanDevice)) {
 			disable("Minecraft is not running on the Vulkan backend. Set Graphics API to Vulkan in Video Settings.");

@@ -68,7 +68,7 @@ final class SectionScanner {
 						anySmooth |= faces != WATER_FACES && (registry.isSmooth(state.getBlock()) || isDeepSnow(state));
 					}
 					int emission = state.getLightEmission();
-					if (emission > 0) {
+					if (emission > 0 && isExposed(region, pos, state)) {
 						if (emitters == null) {
 							emitters = new int[64];
 						} else if (emitterCount == emitters.length) {
@@ -127,6 +127,22 @@ final class SectionScanner {
 			return SOLID;
 		}
 		return state.isCollisionShapeFullBlock(region, pos.set(x, y, z)) ? PIN : OPEN;
+	}
+
+	// An emitter enclosed by opaque blocks or more of itself (the inside of a lava lake) cannot
+	// light anything; skipping those keeps lava oceans from flooding the light lists.
+	private static boolean isExposed(RenderSectionRegion region, BlockPos.MutableBlockPos pos, BlockState state) {
+		int x = pos.getX(), y = pos.getY(), z = pos.getZ();
+		boolean exposed = false;
+		for (net.minecraft.core.Direction direction : net.minecraft.core.Direction.values()) {
+			BlockState neighbor = region.getBlockState(pos.set(x + direction.getStepX(), y + direction.getStepY(), z + direction.getStepZ()));
+			if (!neighbor.canOcclude() && neighbor.getBlock() != state.getBlock()) {
+				exposed = true;
+				break;
+			}
+		}
+		pos.set(x, y, z);
+		return exposed;
 	}
 
 	private static boolean isDeepSnow(BlockState state) {

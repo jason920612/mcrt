@@ -21,6 +21,13 @@ public class GameRendererMixin {
 		return projection;
 	}
 
+	@Inject(method = "render", at = @At("TAIL"))
+	private void mcrt$countVanillaFrames(CallbackInfo ci) {
+		if (Boolean.getBoolean("mcrt.disable")) {
+			RtRenderer.logVanillaFps();
+		}
+	}
+
 	@Inject(method = "close", at = @At("HEAD"))
 	private void mcrt$beforeClose(CallbackInfo ci) {
 		RtRenderer.get().shutdown();

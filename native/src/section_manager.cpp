@@ -4,6 +4,7 @@
 #include "terrain_mesher.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 
@@ -481,31 +482,53 @@ bool SectionManager::recordUpdates(VkCommandBuffer cmd, uint32_t slot, uint64_t 
 }
 
 void SectionManager::rebuildLights(uint64_t retireValue) {
-    // Gather each light-owning section's lights into every resident neighbor (3x3x3 sections):
-    // block light reaches 15 blocks, so that neighborhood covers every light that matters.
-    std::unordered_map<uint32_t, std::vector<GpuLight>> perSlot;
+    const auto started = std::chrono::steady_clock::now();
+    // Each section lists the lights of its 3x3x3 neighborhood (block light reaches 15 blocks).
+    // Dense emitters (lava lakes) would make that list huge, so beyond kMaxLightsPerSection it is a
+    // stratified sample whose entries each stand for count / kept lights.
+    constexpr size_t kMaxLightsPerSection = 256;
     totalLights_ = 0;
-    for (const auto& [k, owner] : resident_) {
-        if (owner.lights.empty())
-            continue;
+    for (const auto& [k, owner] : resident_)
         totalLights_ += owner.lights.size();
-        for (int dx = -1; dx <= 1; ++dx)
-            for (int dy = -1; dy <= 1; ++dy)
-                for (int dz = -1; dz <= 1; ++dz) {
-                    auto it = resident_.find(key(owner.x + dx, owner.y + dy, owner.z + dz));
-                    if (it == resident_.end())
-                        continue;
-                    auto& list = perSlot[it->second.slot];
-                    list.insert(list.end(), owner.lights.begin(), owner.lights.end());
-                }
-    }
 
-    std::vector<uint32_t> ranges(size_t(infoCapacity_) * 2, 0);
+    std::vector<uint32_t> ranges(size_t(infoCapacity_) * 4, 0);
     std::vector<GpuLight> list;
-    for (auto& [slot, lights] : perSlot) {
-        ranges[size_t(slot) * 2] = static_cast<uint32_t>(list.size());
-        ranges[size_t(slot) * 2 + 1] = static_cast<uint32_t>(lights.size());
-        list.insert(list.end(), lights.begin(), lights.end());
+    if (totalLights_ > 0) {
+        std::vector<const std::vector<GpuLight>*> sources;
+        for (const auto& [k, section] : resident_) {
+            sources.clear();
+            size_t available = 0;
+            for (int dx = -1; dx <= 1; ++dx)
+                for (int dy = -1; dy <= 1; ++dy)
+                    for (int dz = -1; dz <= 1; ++dz) {
+                        auto it = resident_.find(key(section.x + dx, section.y + dy, section.z + dz));
+                        if (it != resident_.end() && !it->second.lights.empty()) {
+                            sources.push_back(&it->second.lights);
+                            available += it->second.lights.size();
+                        }
+                    }
+            if (available == 0)
+                continue;
+            const size_t kept = std::min(available, kMaxLightsPerSection);
+            const size_t offset = list.size();
+            // Stratified pick of `kept` lights across the concatenated neighborhood lists.
+            size_t source = 0, base = 0;
+            for (size_t i = 0; i < kept; ++i) {
+                size_t index = (i * available) / kept + (available / kept) / 2;
+                while (index >= base + sources[source]->size()) {
+                    base += sources[source]->size();
+                    ++source;
+                }
+                list.push_back((*sources[source])[index - base]);
+            }
+            const float weight = float(available) / float(kept);
+            uint32_t weightBits;
+            std::memcpy(&weightBits, &weight, sizeof(weightBits));
+            uint32_t* range = &ranges[size_t(section.slot) * 4];
+            range[0] = static_cast<uint32_t>(offset);
+            range[1] = static_cast<uint32_t>(kept);
+            range[2] = weightBits;
+        }
     }
     if (list.empty())
         list.push_back({});
@@ -527,6 +550,7 @@ void SectionManager::rebuildLights(uint64_t retireValue) {
     lightRangesCapacity_ = infoCapacity_;
     lightsDirty_ = false;
     framesSinceLightRebuild_ = 0;
+    lastLightRebuildMs_ = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - started).count();
 }
 
 void SectionManager::appendInstances(std::vector<VkAccelerationStructureInstanceKHR>& out,

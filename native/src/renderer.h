@@ -62,6 +62,7 @@ private:
     VkSemaphore timeline_ = VK_NULL_HANDLE;
     VkQueryPool timestamps_ = VK_NULL_HANDLE; // two per frame slot: start, end of our pass
     float gpuFrameMs_ = 0.0f;
+    float cpuFrameMs_ = 0.0f;
     uint64_t lastSignalValue_ = 0;
 
     VkDescriptorSetLayout descriptorSetLayout_ = VK_NULL_HANDLE;

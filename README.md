@@ -18,9 +18,11 @@
 ./gradlew runClient -PmcrtDevTime=6000 # 開發用：把單人世界固定在某個時間（6000 = 正午）並設為晴天
 ./gradlew runClient -PmcrtDevSpin=1.5  # 開發用：玩家每 tick 自動旋轉的角度，用來測試移動中的降噪
 ./gradlew runClient "-PmcrtDevCommands=setblock ~ ~ ~3 glowstone;..."  # 開發用：進入世界後執行一次的指令（用分號分隔）
+./gradlew runClient -PmcrtCheckerboard=false  # 關閉棋盤格光照（預設開啟：每幀只有一半像素計算光照，由降噪器補齊）
+./gradlew runClient -PmcrtDisable             # 停用光追，用原版 Vulkan 渲染做效能對照（日誌會輸出 [vanilla] fps）
 ```
 
-執行期間，日誌每 5 秒會輸出一行 `[stats]`，包含 FPS、GPU 耗時（光追、降噪、合成的總和）、常駐區段數、待處理區段數、TLAS instance 數，以及發光方塊數。
+執行期間，日誌每 5 秒會輸出一行 `[stats]`，包含 FPS、GPU 耗時（起點時間戳會包含等待前面工作的時間，偏高）、原生端每幀的 CPU 耗時、光源清單重建耗時、常駐區段數、待處理區段數、TLAS instance 數，以及發光方塊數。
 
 ## 架構
 
@@ -62,6 +64,12 @@
 - **大氣**（`shaders/atmosphere.slang`、`sky.slang`）：Rayleigh 與 Mie 單次散射，每幀用 compute 算出 192×108 的天空查找表（sky-view LUT）。太陽的顏色由大氣透射率決定，所以日落時會偏橘紅。夜晚有月亮、月光和程序產生的星空。
 - **體積雲**（`shaders/clouds.slang`）：在 MC 的雲層高度用程序噪聲做 raymarching，光照用 Henyey-Greenstein 相位函數，會隨風飄動。每幀先算進 512×256 的查找表，主視線和水面反射都直接查表；雲也會在地面投下陰影。MC 原本的扁平雲層已停用。
 - **水**：方塊材質 ID 255 保留給水面。水面有動態波浪法線、Fresnel 反射（真的發射反射光線）、太陽高光閃爍、折射，以及依水中路徑長度計算的吸收（Beer-Lambert，紅光衰減最快）。
+
+## 其他維度與水下
+
+- **地獄與終界**：沒有太陽、雲和大氣，光線打出世界時的亮度改用該維度的霧色。
+- **攝影機在水中**：光線一開始就算在水裡，路徑上會吸收和散射；從水下看水面時有折射和全反射。攝影機在岩漿中時，畫面直接填滿岩漿色。
+- **大量發光方塊（例如岩漿湖）**：只收錄外露的發光方塊；每個區段的光源清單最多 256 個，超過時分層抽樣，並給每個樣本「代表權重」以維持期望亮度。
 
 ## 高度細節
 

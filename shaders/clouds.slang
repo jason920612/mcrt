@@ -15,6 +15,12 @@ struct KeyLight
 KeyLight keyLight()
 {
     KeyLight light;
+    if (skyType(frame) != SKY_OVERWORLD)
+    {
+        light.dir = float3(0.0, 1.0, 0.0);
+        light.radiance = 0.0;
+        return light;
+    }
     float sun = frame.sunDir.w;
     float moon = frame.moonDir.w;
     if (sun >= moon)
@@ -105,7 +111,7 @@ float henyeyGreenstein(float cosTheta, float g)
 // How much the cloud layer above a point dims direct sunlight.
 float cloudShadow(float3 pos, float3 lightDir)
 {
-    if (lightDir.y < 0.05)
+    if (lightDir.y < 0.05 || skyType(frame) != SKY_OVERWORLD)
         return 1.0;
     float3 world = worldPosition(pos);
     float mid = frame.atmosphere.x + CLOUD_THICKNESS * 0.5;
@@ -120,7 +126,7 @@ float cloudShadow(float3 pos, float3 lightDir)
 // a = transmittance of the background sky.
 float4 marchClouds(float3 origin, float3 dir, float3 ambient)
 {
-    if (dir.y < 0.01)
+    if (dir.y < 0.01 || skyType(frame) != SKY_OVERWORLD)
         return float4(0.0, 0.0, 0.0, 1.0);
     float3 start = worldPosition(origin);
     float base = frame.atmosphere.x;

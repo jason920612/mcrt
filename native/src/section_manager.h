@@ -63,12 +63,14 @@ public:
     void appendInstances(std::vector<VkAccelerationStructureInstanceKHR>& out, const int32_t cameraBlock[3]) const;
 
     const Buffer& sectionInfoBuffer() const { return infoBuffer_; }
-    // Per section slot: (offset, count) into lightList(); lights of the section and its 26 neighbors.
+    // Per section slot: uint4 (offset, count, weight as float bits, 0) into lightList(): a sample of
+    // the lights of the section and its 26 neighbors; each listed light stands for `weight` lights.
     const Buffer& lightRanges() const { return lightRanges_; }
     const Buffer& lightList() const { return lightList_; }
     size_t residentCount() const { return resident_.size(); }
     size_t pendingCount() const { return pending_.size(); }
     size_t lightCount() const { return totalLights_; }
+    float lastLightRebuildMs() const { return lastLightRebuildMs_; }
 
     // Destroys everything immediately; the caller guarantees the GPU is idle.
     void destroyAll();
@@ -130,6 +132,7 @@ private:
     uint32_t framesSinceLightRebuild_ = 0;
     uint32_t lightRangesCapacity_ = 0;
     size_t totalLights_ = 0;
+    float lastLightRebuildMs_ = 0.0f;
 };
 
 } // namespace mcrt

@@ -54,7 +54,7 @@ struct GpuLight
 [[vk::binding(5, 0)]] StructuredBuffer<SectionInfo> sections;
 [[vk::binding(6, 0)]] Texture2D<float4> blockAtlas;
 [[vk::binding(7, 0)]] SamplerState atlasSampler;
-[[vk::binding(8, 0)]] StructuredBuffer<uint2> lightRanges;
+[[vk::binding(8, 0)]] StructuredBuffer<uint4> lightRanges; // offset, count, weight (float bits), 0
 [[vk::binding(9, 0)]] StructuredBuffer<GpuLight> lights;
 [[vk::binding(10, 0)]] [format("rgba16f")] RWTexture2D<float4> foregroundOutput;  // sky, translucent layers, emission
 [[vk::binding(11, 0)]] [format("rgba32f")] RWTexture2D<float4> positionOutput;    // block-relative, w = 1 on opaque hit
@@ -480,6 +480,12 @@ float3 cosineSampleHemisphere(float3 n, inout uint seed)
 
 float3 skyRadiance(float3 d, bool includeSunDisk)
 {
+    if (skyType(frame) != SKY_OVERWORLD)
+    {
+        // Nether / End: the dimension's fog color is the only light from "outside".
+        float3 fog = pow(max(frame.skyColor.rgb, 0.0), 2.2);
+        return fog * (skyType(frame) == SKY_END ? 0.6 : 1.2);
+    }
     // Below the horizon the model's planet surface is black; past render distance that reads as a
     // hole, so continue the horizon haze downwards instead.
     float3 lookup = d.y < 0.03 ? normalize(float3(d.x, 0.03, d.z)) : d;
@@ -555,9 +561,10 @@ float3 lightRadiance(uint packed)
 // then a single shadow ray for the chosen candidate.
 float3 blockLightIllumination(float3 pos, float3 n, uint sectionSlot, inout uint seed)
 {
-    uint2 range = lightRanges[sectionSlot];
+    uint4 range = lightRanges[sectionSlot];
     if (range.y == 0)
         return 0.0;
+    float listWeight = asfloat(range.z); // each listed light stands for this many
 
     uint candidates = min(range.y, LIGHT_CANDIDATES);
     float weightSum = 0.0;
@@ -595,7 +602,7 @@ float3 blockLightIllumination(float3 pos, float3 n, uint sectionSlot, inout uint
     if (dist > 0.9 && !traceShadow(pos + n * 0.002, dir, dist - 0.87))
         return 0.0;
     float3 contribution = chosenRadiance * dot(n, dir) / max(dist * dist, 0.25);
-    return contribution * (weightSum / (float(candidates) * chosenTarget));
+    return contribution * (weightSum / (float(candidates) * chosenTarget)) * listWeight;
 }
 
 float3 directIllumination(float3 pos, float3 n, uint sectionSlot, KeyLight light, inout uint seed)
@@ -715,6 +722,9 @@ void rayGen()
 
     KeyLight light = keyLight();
     uint debugMode = uint(frame.params.z);
+    // Checkerboard lighting: primary visibility everywhere, expensive lighting on alternating halves.
+    bool lightThisPixel = (frame.frameInfo.w & FLAG_CHECKERBOARD_LIGHTING) == 0
+                       || ((pixel.x + pixel.y + frame.frameInfo.x) & 1) == 0;
     float3 foreground = 0.0;
     float3 throughput = 1.0;
     float3 albedo = 0.0;
@@ -724,12 +734,19 @@ void rayGen()
     float depth = 0.0; // Minecraft clears depth to 0 (reverse Z)
 
     float tMin = 0.0;
-    bool inWater = false;
-    bool sawWater = false;
-    float3 waterAmbient = 0.0;
-    for (uint layer = 0; layer < 4; ++layer)
+    bool layerLimitReached = false;
+    bool inWater = (frame.frameInfo.w & FLAG_CAMERA_IN_WATER) != 0;
+    bool sawWater = inWater;
+    float3 waterAmbient = skyRadiance(float3(0, 1, 0), false) + light.radiance * saturate(light.dir.y);
+    if ((frame.frameInfo.w & FLAG_CAMERA_IN_LAVA) != 0)
+    {
+        foreground = float3(2.0, 0.5, 0.08); // inside lava: nothing else is visible
+        layerLimitReached = true;
+    }
+    for (uint layer = 0; layer < 4 && !layerLimitReached; ++layer)
     {
         Payload hit = tracePrimary(origin, dir, 0xFF, tMin);
+        bool fromWater = inWater;
         if (inWater)
         {
             // Light lost and scattered along the underwater path to whatever comes next.
@@ -755,14 +772,18 @@ void rayGen()
         if (hit.translucent != 0 && hit.materialId == WATER_MATERIAL)
         {
             // Water: wave normal, Fresnel reflection, sun glint, then refract into the volume.
-            float3 n = hit.geometricNormal;
-            if (n.y > 0.5)
-                n = waterNormal(pos);
+            float3 n = hit.geometricNormal; // faces the ray
+            if (abs(n.y) > 0.5)
+            {
+                float3 wave = waterNormal(pos);
+                n = n.y > 0.0 ? wave : float3(wave.x, -wave.y, wave.z);
+            }
             float cosIncident = saturate(dot(-dir, n));
             float fresnel = 0.02 + 0.98 * pow(1.0 - cosIncident, 5.0);
 
             float3 reflected = reflect(dir, n);
-            reflected.y = abs(reflected.y);
+            if (!fromWater)
+                reflected.y = abs(reflected.y);
             float3 reflectOrigin = pos + hit.geometricNormal * 0.01;
             Payload r = tracePrimary(reflectOrigin, reflected, MASK_OPAQUE, 0.0);
             float3 reflection;
@@ -781,11 +802,13 @@ void rayGen()
             throughput *= 1.0 - fresnel;
 
             waterAmbient = skyRadiance(float3(0, 1, 0), false) + light.radiance * saturate(light.dir.y);
-            float3 refracted = refract(dir, n, 1.0 / 1.33);
-            dir = dot(refracted, refracted) > 0.0 ? normalize(refracted) : reflected;
+            // Entering water from air bends towards the normal; leaving it can totally reflect.
+            float3 refracted = refract(dir, n, fromWater ? 1.33 : 1.0 / 1.33);
+            bool totalReflection = dot(refracted, refracted) <= 0.0;
+            dir = totalReflection ? reflected : normalize(refracted);
             origin = pos;
             tMin = 0.001;
-            inWater = dir.y < 0.0;
+            inWater = fromWater ? totalReflection : dir.y < 0.0;
             sawWater = true;
             continue;
         }
@@ -803,14 +826,17 @@ void rayGen()
         }
 
         foreground += throughput * hit.albedo * hit.emission * EMISSIVE_SURFACE_RADIANCE;
-        // Seen through water, most of the light is absorbed: direct light is enough.
-        illumination = sawWater ? directIllumination(pos, hit.normal, hit.sectionSlot, light, seed)
-                                      + skyRadiance(float3(0, 1, 0), false) * 0.5
-                                : surfaceIllumination(pos, hit, light, seed);
-        // Specular rides along in the demodulated buffer (divided by albedo here, multiplied back in compose).
-        float3 specular = keyLightSpecular(hit.normal, -dir, hit.roughness, light);
-        if (any(specular > 0.0) && traceShadow(pos + hit.geometricNormal * 0.004, light.dir, 1024.0))
-            illumination += specular * cloudShadow(pos, light.dir) / max(hit.albedo, 0.03);
+        if (lightThisPixel)
+        {
+            // Seen through water, most of the light is absorbed: direct light is enough.
+            illumination = sawWater ? directIllumination(pos, hit.normal, hit.sectionSlot, light, seed)
+                                          + skyRadiance(float3(0, 1, 0), false) * 0.5
+                                    : surfaceIllumination(pos, hit, light, seed);
+            // Specular rides along in the demodulated buffer (divided by albedo here, multiplied back in compose).
+            float3 specular = keyLightSpecular(hit.normal, -dir, hit.roughness, light);
+            if (any(specular > 0.0) && traceShadow(pos + hit.geometricNormal * 0.004, light.dir, 1024.0))
+                illumination += specular * cloudShadow(pos, light.dir) / max(hit.albedo, 0.03);
+        }
         albedo = throughput * hit.albedo;
         float3 cameraRelative = pos - frame.cameraOffset.xyz;
         position = float4(pos, 1.0);
@@ -819,7 +845,8 @@ void rayGen()
         break;
     }
 
-    noisyIllumination[pixel] = float4(illumination, 0.0);
+    // w = 1 when this pixel was lit this frame; the denoiser fills the others from neighbors.
+    noisyIllumination[pixel] = float4(illumination, lightThisPixel ? 1.0 : 0.0);
     albedoModulation[pixel] = float4(albedo, 0.0);
     foregroundOutput[pixel] = float4(foreground, 0.0);
     positionOutput[pixel] = position;

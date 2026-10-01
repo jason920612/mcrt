@@ -35,7 +35,8 @@ typedef struct McrtFrameInput {
     uint32_t frame_index;
     uint32_t debug_mode;
     int32_t camera_block_pos[3]; // floor(camera position)
-    uint32_t flags;
+    uint32_t flags;              // bits 0-1 sky (0 overworld, 1 none, 2 end), bit 2 camera in water, bit 3 in lava,
+                                 // bit 4 checkerboard lighting
     float camera_offset[4];      // camera position - camera_block_pos
     float view_proj[16];         // projection * viewRotation (camera-relative, as Minecraft rasterizes), column-major
     float inv_view_proj[16];
@@ -61,7 +62,8 @@ typedef struct McrtStats {
     uint32_t reserved0;
     float gpu_frame_ms;          // GPU time of our pass, a few frames old
     uint32_t lights;             // emissive blocks across resident sections
-    uint32_t reserved[2];
+    float cpu_frame_ms;          // CPU time of the last mcrt_render_frame
+    float cpu_lights_ms;         // CPU time of the last light list rebuild
 } McrtStats;
 
 // Returns null on failure; see mcrt_last_error().

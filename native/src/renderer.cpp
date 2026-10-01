@@ -4,6 +4,7 @@
 #include "shaders/sky.spv.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 
@@ -478,7 +479,7 @@ void Renderer::ensureTlas(uint32_t instanceCount, uint64_t retireValue) {
     geometry.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
     VkAccelerationStructureBuildGeometryInfoKHR build{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
     build.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
-    build.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR;
+    build.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
     build.geometryCount = 1;
     build.pGeometries = &geometry;
     VkAccelerationStructureBuildSizesInfoKHR sizes{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
@@ -530,7 +531,7 @@ void Renderer::recordTlasBuild(VkCommandBuffer cmd, FrameSlot& slot, const McrtF
     geometry.geometry.instances.data.deviceAddress = slot.instances.address;
     VkAccelerationStructureBuildGeometryInfoKHR build{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
     build.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
-    build.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR;
+    build.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
     build.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
     build.geometryCount = 1;
     build.pGeometries = &geometry;
@@ -610,6 +611,8 @@ McrtStats Renderer::stats() const {
     s.tlas_instances = tlasInstanceCount_;
     s.gpu_frame_ms = gpuFrameMs_;
     s.lights = static_cast<uint32_t>(sections_->lightCount());
+    s.cpu_frame_ms = cpuFrameMs_;
+    s.cpu_lights_ms = sections_->lastLightRebuildMs();
     return s;
 }
 
@@ -627,6 +630,7 @@ void Renderer::waitForValue(uint64_t value) {
 }
 
 bool Renderer::renderFrame(const McrtFrameInput& input, McrtFrameOutput& output) {
+    const auto started = std::chrono::steady_clock::now();
     if (input.width == 0 || input.height == 0 || !input.color_image || !input.depth_image || !input.atlas_image)
         return false;
     for (float v : input.inv_view_proj)
@@ -695,6 +699,7 @@ bool Renderer::renderFrame(const McrtFrameInput& input, McrtFrameOutput& output)
     uniforms.frameInfo[0] = input.frame_index;
     uniforms.frameInfo[1] = input.width;
     uniforms.frameInfo[2] = input.height;
+    uniforms.frameInfo[3] = input.flags;
     for (int i = 0; i < 3; ++i)
         uniforms.cameraBlock[i] = input.camera_block_pos[i];
     if (!hasPrevious_) {
@@ -742,6 +747,7 @@ bool Renderer::renderFrame(const McrtFrameInput& input, McrtFrameOutput& output)
     MCRT_VK_CHECK(vkEndCommandBuffer(cmd));
 
     slot.signalValue = ++lastSignalValue_;
+    cpuFrameMs_ = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - started).count();
     output.command_buffer = reinterpret_cast<uint64_t>(cmd);
     output.semaphore = reinterpret_cast<uint64_t>(timeline_);
     output.signal_value = slot.signalValue;
