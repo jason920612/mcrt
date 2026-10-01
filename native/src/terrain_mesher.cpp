@@ -62,7 +62,8 @@ constexpr int kSamples = kSampleMax - kSampleMin + 1;
 constexpr float kKernelRadius = 1.6f;     // blocks
 constexpr float kPinMargin = 0.2f;        // field value forced at block centers
 
-enum Relief : uint8_t { kReliefNone = 0, kReliefSoil = 1, kReliefRock = 2, kReliefSand = 3, kReliefSnow = 4 };
+enum Relief : uint8_t { kReliefNone = 0, kReliefSoil = 1, kReliefRock = 2, kReliefSand = 3, kReliefSnow = 4, kReliefFloe = 5 };
+constexpr int kReliefKinds = 6;
 
 std::atomic<uint32_t> g_materialFlags[256];
 std::atomic<uint32_t> g_cardMaterials[4];
@@ -118,6 +119,10 @@ float reliefNoise(uint8_t kind, float x, float y, float z) {
     }
     case kReliefSnow:
         return valueNoise(x * 0.25f, y * 0.25f, z * 0.25f) * 2.0f - 1.0f;
+    case kReliefFloe:
+        // Sea ice: the field varies only horizontally, so floe outlines wander off the block grid
+        // while the (thin) floe keeps a flat top.
+        return (valueNoise(x * 0.3f, 0.5f, z * 0.3f) * 0.65f + valueNoise(x * 0.95f + 7.0f, 0.5f, z * 0.95f) * 0.35f) * 2.0f - 1.0f;
     default:
         return 0.0f;
     }
@@ -129,6 +134,7 @@ float reliefAmplitude(uint8_t kind) {
     case kReliefSoil: return 0.22f;
     case kReliefSand: return 0.12f;
     case kReliefSnow: return 0.1f;
+    case kReliefFloe: return 0.7f;
     default: return 0.0f;
     }
 }
@@ -158,7 +164,7 @@ uint8_t reliefOf(uint16_t materials) {
         return id ? uint8_t((g_materialFlags[id].load(std::memory_order_relaxed) >> 8) & 0xFF) : uint8_t(kReliefNone);
     };
     uint8_t topKind = kind(top);
-    if (topKind == kReliefSnow || topKind == kReliefSand)
+    if (topKind == kReliefSnow || topKind == kReliefSand || topKind == kReliefFloe)
         return topKind; // a covering layer shapes the surface
     uint8_t sideKind = kind(side);
     return sideKind != kReliefNone ? sideKind : topKind;
@@ -208,7 +214,7 @@ private:
         const int bz0 = int(std::ceil(pz - kKernelRadius - 0.5f)), bz1 = int(std::floor(pz + kKernelRadius - 0.5f));
         const float r2max = kKernelRadius * kKernelRadius;
         float vote = 0.0f, weightSum = 0.0f;
-        float reliefWeight[5] = {0, 0, 0, 0, 0};
+        float reliefWeight[kReliefKinds] = {};
         for (int by = by0; by <= by1; ++by)
             for (int bz = bz0; bz <= bz1; ++bz)
                 for (int bx = bx0; bx <= bx1; ++bx) {
@@ -219,7 +225,12 @@ private:
                     float t = 1.0f - r2 / r2max;
                     const float w = t * t * t;
                     const uint8_t type = in_.type(bx, by, bz);
-                    vote += fieldInside(type) ? w : -w;
+                    // Under a one-block-thick floating slab (sea ice), the open block below votes
+                    // "inside": the slab's edges then round off like the rim of thick ground
+                    // (the block's own center stays pinned open).
+                    const bool underSlab = type == kOpen && in_.type(bx, by + 1, bz) == kSmooth &&
+                                           !fieldInside(in_.type(bx, by + 2, bz));
+                    vote += fieldInside(type) || underSlab ? w : -w;
                     weightSum += w;
                     if (type == kSmooth)
                         reliefWeight[reliefOf(in_.material(bx, by, bz))] += w;
@@ -227,7 +238,7 @@ private:
         float f = weightSum > 0.0f ? vote / weightSum : -1.0f;
         if (weightSum > 0.0f) {
             const float wx = px + ox, wy = py + oy, wz = pz + oz; // absolute: identical across sections
-            for (uint8_t kind = 1; kind < 5; ++kind)
+            for (uint8_t kind = 1; kind < kReliefKinds; ++kind)
                 if (reliefWeight[kind] > 0.0f)
                     f += reliefWeight[kind] / weightSum * reliefAmplitude(kind) * reliefNoise(kind, wx, wy, wz);
         }

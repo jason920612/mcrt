@@ -33,7 +33,7 @@ RESOLUTION = "1K-JPG"
 
 
 # Terrain relief (native/src/terrain_mesher.cpp): how smoothed terrain of this material is sculpted.
-RELIEF_KINDS = {"none": 0, "soil": 1, "rock": 2, "sand": 3, "snow": 4}
+RELIEF_KINDS = {"none": 0, "soil": 1, "rock": 2, "sand": 3, "snow": 4, "floe": 5}
 # Vegetation card kinds (native/src/terrain_mesher.h): what an alpha-tested card texture is for.
 CARD_KINDS = {"none": 0, "grass": 1, "broadleaf": 2, "needle": 3}
 
