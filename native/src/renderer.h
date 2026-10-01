@@ -100,6 +100,9 @@ private:
 
     std::unique_ptr<Denoiser> denoiser_; // owns the G-buffer and the composed HDR image
     std::unique_ptr<TemporalUpscaler> upscaler_; // TAA/upscale to output resolution, final image + depth
+    std::array<Buffer, 2> reservoirs_{}; // ReSTIR reservoirs (pathtrace.slang), ping-pong
+    uint32_t reservoirIndex_ = 0;
+    bool reservoirsNeedClear_ = false;
     Buffer depth_;                       // float per pixel, copied into the D32 depth target
     uint32_t depthWidth_ = 0, depthHeight_ = 0;
     uint32_t historyIndex_ = 0;          // which denoiser history buffer is current

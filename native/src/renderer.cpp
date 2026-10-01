@@ -305,6 +305,8 @@ void Renderer::createDescriptors() {
         {18, VK_DESCRIPTOR_TYPE_SAMPLER, 1, rgen | hits, nullptr},
         {19, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, rgen | hits, nullptr}, // cloud LUT
         {20, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, hits, nullptr},         // material roughness/ao array
+        {21, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, rgen, nullptr},         // reservoirs (previous frame)
+        {22, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, rgen, nullptr},         // reservoirs (this frame)
     };
     VkDescriptorSetLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     layoutInfo.bindingCount = static_cast<uint32_t>(std::size(bindings));
@@ -314,7 +316,7 @@ void Renderer::createDescriptors() {
     VkDescriptorPoolSize poolSizes[] = {
         {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, kFramesInFlight},
         {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 5 * kFramesInFlight},
-        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 5 * kFramesInFlight},
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 7 * kFramesInFlight},
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, kFramesInFlight},
         {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 6 * kFramesInFlight},
         {VK_DESCRIPTOR_TYPE_SAMPLER, 3 * kFramesInFlight},
@@ -449,6 +451,14 @@ void Renderer::ensureTargets(uint32_t width, uint32_t height, uint64_t retireVal
         return;
     Buffer oldDepth = depth_;
     deletion_.push(retireValue, [this, oldDepth]() mutable { ctx_->destroyBuffer(oldDepth); });
+    for (Buffer& reservoirs : reservoirs_) {
+        Buffer old = reservoirs;
+        deletion_.push(retireValue, [this, old]() mutable { ctx_->destroyBuffer(old); });
+        reservoirs = ctx_->createBuffer(VkDeviceSize(width) * height * 48,
+                                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                        MemoryKind::DeviceLocal);
+    }
+    reservoirsNeedClear_ = true;
     depth_ = ctx_->createBuffer(VkDeviceSize(width) * height * sizeof(float),
                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                                 MemoryKind::DeviceLocal);
@@ -576,7 +586,10 @@ void Renderer::updateDescriptors(FrameSlot& slot) {
 
     VkDescriptorImageInfo cloudViewInfo{VK_NULL_HANDLE, cloudView_.view, VK_IMAGE_LAYOUT_GENERAL};
 
-    VkWriteDescriptorSet writes[21]{};
+    VkDescriptorBufferInfo reservoirPreviousInfo{reservoirs_[reservoirIndex_ ^ 1].buffer, 0, VK_WHOLE_SIZE};
+    VkDescriptorBufferInfo reservoirOutputInfo{reservoirs_[reservoirIndex_].buffer, 0, VK_WHOLE_SIZE};
+
+    VkWriteDescriptorSet writes[23]{};
     auto write = [&](uint32_t binding, VkDescriptorType type) -> VkWriteDescriptorSet& {
         VkWriteDescriptorSet& w = writes[binding];
         w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -607,7 +620,9 @@ void Renderer::updateDescriptors(FrameSlot& slot) {
     write(18, VK_DESCRIPTOR_TYPE_SAMPLER).pImageInfo = &skySamplerInfo;
     write(19, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE).pImageInfo = &cloudViewInfo;
     write(20, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE).pImageInfo = &materialSurfaceInfo;
-    vkUpdateDescriptorSets(ctx_->device(), 21, writes, 0, nullptr);
+    write(21, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).pBufferInfo = &reservoirPreviousInfo;
+    write(22, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).pBufferInfo = &reservoirOutputInfo;
+    vkUpdateDescriptorSets(ctx_->device(), 23, writes, 0, nullptr);
 }
 
 McrtStats Renderer::stats() const {
@@ -683,6 +698,13 @@ bool Renderer::renderFrame(const McrtFrameInput& input, McrtFrameOutput& output)
     vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, timestamps_, slotIndex * 2);
     denoiser_->recordTargetInit(cmd);
     upscaler_->recordTargetInit(cmd);
+    if (reservoirsNeedClear_) {
+        for (Buffer& reservoirs : reservoirs_)
+            vkCmdFillBuffer(cmd, reservoirs.buffer, 0, VK_WHOLE_SIZE, 0);
+        memoryBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+                      VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+        reservoirsNeedClear_ = false;
+    }
     materials_->recordUploads(cmd, retireValue);
 
     sections_->recordUpdates(cmd, slotIndex, retireValue, input.camera_block_pos);
@@ -696,6 +718,7 @@ bool Renderer::renderFrame(const McrtFrameInput& input, McrtFrameOutput& output)
                   VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR);
 
     historyIndex_ ^= 1;
+    reservoirIndex_ ^= 1;
     FrameUniforms uniforms{};
     std::memcpy(uniforms.viewProj, input.view_proj, sizeof(uniforms.viewProj));
     std::memcpy(uniforms.invViewProj, input.inv_view_proj, sizeof(uniforms.invViewProj));
@@ -726,6 +749,7 @@ bool Renderer::renderFrame(const McrtFrameInput& input, McrtFrameOutput& output)
     uniforms.taa[0] = halton(input.frame_index % 8 + 1, 2) - 0.5f;
     uniforms.taa[1] = halton(input.frame_index % 8 + 1, 3) - 0.5f;
     uniforms.taa[2] = scale;
+    uniforms.taa[3] = hasPrevious_ ? float(sections_->lightGeneration()) : -1.0f; // ReSTIR reuse
     uniforms.frameInfo[3] = input.flags | (sections_->hasFarTerrain() ? 32u : 0u); // FLAG_FAR_TERRAIN
     for (int i = 0; i < 3; ++i)
         uniforms.cameraBlock[i] = input.camera_block_pos[i];

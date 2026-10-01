@@ -82,6 +82,26 @@ static const uint VERTEX_FAR_WATER = 32;
 [[vk::binding(19, 0)]] Texture2D<float4> cloudViewLut; // sky.slang: rgb scattered, a transmittance
 [[vk::binding(20, 0)]] Texture2DArray<float4> materialSurface; // BC5: roughness, ambient occlusion
 
+// Temporal ReSTIR for block lights at the primary surface: each pixel keeps the light it chose
+// (a reservoir), and the next frame merges it with its own candidates.
+struct Reservoir
+{
+    int3 blockPos;           // chosen light (absolute block position)
+    uint packed;             // its GpuLight.packed
+    float3 position;         // shading point, relative to that frame's camera
+    float W;                 // unbiased contribution weight (0: none, or found occluded)
+    float M;                 // number of candidates it summarizes
+    uint generation;         // light list version it was chosen from
+    float2 pad;
+};
+[[vk::binding(21, 0)]] StructuredBuffer<Reservoir> reservoirPrevious;
+[[vk::binding(22, 0)]] RWStructuredBuffer<Reservoir> reservoirOutput;
+static const float RESERVOIR_HISTORY = 20.0; // cap on reused candidates, relative to new ones
+
+// Set by the ray generation shader for the primary surface's lighting: the pixel whose reservoir
+// blockLightIllumination reads and writes (-1: none, e.g. for bounces).
+static int2 gReservoirPixel = int2(-1, -1);
+
 // Material data as one vector: normal xy, roughness, ao.
 float4 sampleMaterialData(float3 uvLayer, float lod)
 {
@@ -761,11 +781,51 @@ float3 lightRadiance(uint packed)
 
 // Block lights near a surface: resampled importance sampling (RIS) over the section's light list,
 // then a single shadow ray for the chosen candidate.
+uint reservoirIndex(int2 pixel)
+{
+    return uint(pixel.y) * DispatchRaysDimensions().x + uint(pixel.x);
+}
+
+// Last frame's reservoir for the surface at pos (block-relative), if it is the same surface.
+bool previousReservoir(float3 pos, out Reservoir r)
+{
+    r = (Reservoir)0;
+    float3 previousRelative = pos + frame.prevCameraShift.xyz;
+    float4 clip = transformColumns(frame.prevViewProj, float4(previousRelative, 1.0));
+    if (clip.w <= 0.0 || frame.taa.w < 0.0)
+        return false;
+    float2 uv = clip.xy / clip.w * 0.5 + 0.5;
+    if (any(uv < 0.0) || any(uv >= 1.0))
+        return false;
+    int2 pixel = int2(uv * float2(DispatchRaysDimensions().xy));
+    r = reservoirPrevious[reservoirIndex(pixel)];
+    float3 d = r.position - previousRelative;
+    return r.M > 0.0 && r.generation == uint(frame.taa.w) && dot(d, d) < 0.09;
+}
+
+// Pixels lit only every other frame (checkerboard) keep their reservoir alive.
+void carryReservoir(int2 pixel, float3 pos)
+{
+    Reservoir r;
+    if (previousReservoir(pos, r))
+        r.position = pos - frame.cameraOffset.xyz;
+    else
+        r = (Reservoir)0;
+    reservoirOutput[reservoirIndex(pixel)] = r;
+}
+
 float3 blockLightIllumination(float3 pos, float3 n, uint sectionSlot, inout uint seed)
 {
+    int2 reservoirPixel = gReservoirPixel;
+    gReservoirPixel = int2(-1, -1); // only the primary surface's own call
+    bool primary = reservoirPixel.x >= 0;
     uint4 range = lightRanges[sectionSlot];
     if (range.y == 0)
+    {
+        if (primary)
+            reservoirOutput[reservoirIndex(reservoirPixel)] = (Reservoir)0;
         return 0.0;
+    }
     float listWeight = asfloat(range.z); // each listed light stands for this many
 
     uint candidates = min(range.y, LIGHT_CANDIDATES);
@@ -773,6 +833,8 @@ float3 blockLightIllumination(float3 pos, float3 n, uint sectionSlot, inout uint
     float chosenTarget = 0.0;
     float3 chosenPoint = 0.0;
     float3 chosenRadiance = 0.0;
+    int3 chosenBlock = 0;
+    uint chosenPacked = 0;
     for (uint i = 0; i < candidates; ++i)
     {
         uint index = range.x + min(uint(random(seed) * range.y), range.y - 1);
@@ -792,19 +854,67 @@ float3 blockLightIllumination(float3 pos, float3 n, uint sectionSlot, inout uint
             chosenTarget = target;
             chosenPoint = lightPoint;
             chosenRadiance = radiance;
+            chosenBlock = light.blockPos;
+            chosenPacked = light.packed;
         }
     }
-    if (chosenTarget <= 0.0)
-        return 0.0;
+    float M = float(candidates);
 
-    float3 toLight = chosenPoint - pos;
-    float dist = length(toLight);
-    float3 dir = toLight / dist;
-    // Stop short of the light's own block (half diagonal), which would otherwise shadow itself.
-    if (dist > 0.9 && !traceShadow(pos + n * 0.002, dir, dist - 0.87))
-        return 0.0;
-    float3 contribution = chosenRadiance * dot(n, dir) / max(dist * dist, 0.25);
-    return contribution * (weightSum / (float(candidates) * chosenTarget)) * listWeight;
+    // Temporal reuse: last frame's choice competes with this frame's, weighted by how many
+    // candidates it stands for (capped, so lighting still reacts to change).
+    if (primary)
+    {
+        Reservoir previous;
+        if (previousReservoir(pos, previous))
+        {
+            float3 lightPoint = float3(previous.blockPos - frame.cameraBlock.xyz) + 0.5
+                              + (float3(random(seed), random(seed), random(seed)) - 0.5) * 0.4;
+            float3 toLight = lightPoint - pos;
+            float dist2 = max(dot(toLight, toLight), 0.25);
+            float cosTheta = dot(n, toLight) * rsqrt(dist2);
+            float3 radiance = lightRadiance(previous.packed);
+            float target = cosTheta > 0.0 ? luminance(radiance) * cosTheta / dist2 : 0.0;
+            float previousM = min(previous.M, RESERVOIR_HISTORY * float(candidates));
+            float weight = target * previous.W * previousM;
+            weightSum += weight;
+            M += previousM;
+            if (weight > 0.0 && random(seed) * weightSum < weight)
+            {
+                chosenTarget = target;
+                chosenPoint = lightPoint;
+                chosenRadiance = radiance;
+                chosenBlock = previous.blockPos;
+                chosenPacked = previous.packed;
+            }
+        }
+    }
+
+    float W = chosenTarget > 0.0 ? weightSum / (M * chosenTarget) : 0.0;
+    float3 result = 0.0;
+    if (W > 0.0)
+    {
+        float3 toLight = chosenPoint - pos;
+        float dist = length(toLight);
+        float3 dir = toLight / dist;
+        // Stop short of the light's own block (half diagonal), which would otherwise shadow itself.
+        if (dist > 0.9 && !traceShadow(pos + n * 0.002, dir, dist - 0.87))
+            W = 0.0; // occluded: do not hand this light on
+        else
+            result = chosenRadiance * dot(n, dir) / max(dist * dist, 0.25) * W * listWeight;
+    }
+    if (primary)
+    {
+        Reservoir r;
+        r.blockPos = chosenBlock;
+        r.packed = chosenPacked;
+        r.position = pos - frame.cameraOffset.xyz;
+        r.W = W;
+        r.M = M;
+        r.generation = uint(max(frame.taa.w, 0.0));
+        r.pad = 0.0;
+        reservoirOutput[reservoirIndex(reservoirPixel)] = r;
+    }
+    return result;
 }
 
 float3 directIllumination(float3 pos, float3 n, uint sectionSlot, KeyLight light, inout uint seed)
@@ -936,6 +1046,7 @@ void rayGen()
     float4 normal = 0.0;
     float depth = 0.0; // Minecraft clears depth to 0 (reverse Z)
     float firstSurfaceDistance = 0.0; // camera to the first thing the ray meets (0 = sky); compose hazes by it
+    bool reservoirWritten = false;
 
     float tMin = 0.0;
     bool layerLimitReached = false;
@@ -1036,8 +1147,12 @@ void rayGen()
         }
 
         foreground += throughput * hit.albedo * hit.emission * EMISSIVE_SURFACE_RADIANCE;
+        reservoirWritten = true;
+        if (!lightThisPixel)
+            carryReservoir(int2(pixel), pos);
         if (lightThisPixel)
         {
+            gReservoirPixel = int2(pixel);
             // Seen through water, most of the light is absorbed: direct light is enough.
             illumination = sawWater ? directIllumination(pos, hit.normal, hit.sectionSlot, light, seed)
                                           + skyRadiance(float3(0, 1, 0), false) * 0.5
@@ -1059,6 +1174,8 @@ void rayGen()
     noisyIllumination[pixel] = float4(illumination, lightThisPixel ? 1.0 : 0.0);
     albedoModulation[pixel] = float4(albedo, 0.0);
     foregroundOutput[pixel] = float4(foreground, firstSurfaceDistance);
+    if (!reservoirWritten)
+        reservoirOutput[reservoirIndex(int2(pixel))] = (Reservoir)0;
     positionOutput[pixel] = position;
     normalOutput[pixel] = normal;
     depthOutput[pixel.y * size.x + pixel.x] = depth;

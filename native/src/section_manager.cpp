@@ -593,6 +593,7 @@ bool SectionManager::recordUpdates(VkCommandBuffer cmd, uint32_t slot, uint64_t 
 }
 
 void SectionManager::rebuildLights(uint64_t retireValue) {
+    lightGeneration_ = (lightGeneration_ + 1) & 0xFFFFFF; // exact in a float uniform
     const auto started = std::chrono::steady_clock::now();
     // Each section lists the lights of its 3x3x3 neighborhood (block light reaches 15 blocks).
     // Dense emitters (lava lakes) would make that list huge, so beyond kMaxLightsPerSection it is a

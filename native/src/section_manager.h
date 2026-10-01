@@ -59,6 +59,8 @@ public:
     void enqueueFarTerrain(int32_t originX, int32_t originZ, uint32_t size, uint32_t spacing, int32_t seaLevel,
                            const float* heights, const uint32_t* colors);
     bool hasFarTerrain() const;
+    // Changes whenever the light lists are rebuilt (light indices and contents change).
+    uint32_t lightGeneration() const { return lightGeneration_; }
 
     // Render thread. Records uploads and BLAS builds for a budgeted batch of pending sections.
     // Returns true when the visible geometry changed.
@@ -138,6 +140,7 @@ private:
     Buffer lightRanges_;
     Buffer lightList_;
     bool lightsDirty_ = true;
+    uint32_t lightGeneration_ = 0;
     uint32_t framesSinceLightRebuild_ = 0;
     uint32_t lightRangesCapacity_ = 0;
     size_t totalLights_ = 0;
