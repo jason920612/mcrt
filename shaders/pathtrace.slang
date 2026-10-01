@@ -71,6 +71,8 @@ struct MaterialParams
 static const uint MATERIAL_TINTED = 1;
 static const uint VERTEX_CARD = 4;     // vertex light word: vegetation card (see terrain_mesher.cpp)
 static const uint VERTEX_TERRAIN = 8;  // natural terrain
+static const uint VERTEX_FAR = 16;     // far landscape heightfield (past render distance)
+static const uint VERTEX_FAR_WATER = 32;
 [[vk::binding(13, 0)]] Texture2DArray<float4> materialAlbedo; // sRGB view: rgb linear base color, a = height
 [[vk::binding(14, 0)]] Texture2DArray<float4> materialNormal; // BC5: normal xy (OpenGL convention)
 [[vk::binding(15, 0)]] SamplerState materialSampler;
@@ -491,6 +493,24 @@ SurfaceSample fetchSurface(BuiltInTriangleIntersectionAttributes attribs, uint f
     s.roughness = 0.9;
     s.materialId = 0;
     s.emission = float((v0.light >> 12) & 0xF) / 15.0;
+    if ((v0.light & VERTEX_FAR) != 0)
+    {
+        // Far landscape: only past the loaded chunks (inside them it would cover the real world).
+        float3 pos = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
+        float2 rel = pos.xz - frame.cameraOffset.xz;
+        float inner = frame.atmosphere.y - 12.0;
+        s.alpha = dot(rel, rel) < inner * inner ? 0.0 : 1.0;
+        s.albedo = pow(saturate(tint.rgb), 2.2);
+        float3 farNormal = octDecode(uv);
+        s.normal = dot(farNormal, n) < 0.0 ? -farNormal : farNormal;
+        bool water = (v0.light & VERTEX_FAR_WATER) != 0 && (v1.light & VERTEX_FAR_WATER) != 0 && (v2.light & VERTEX_FAR_WATER) != 0;
+        s.roughness = water ? 0.06 : 0.95;
+        if (water)
+            s.materialId = WATER_MATERIAL; // shaded as water: reflection, refraction into deep sea
+        if (!water && s.alpha > 0.0)
+            applyMacroDetail(s, pos + float3(frame.cameraBlock.xyz));
+        return s;
+    }
     if ((v0.light & VERTEX_CARD) != 0)
     {
         // Vegetation card: material texture with coverage alpha, tinted by the biome color, lit
@@ -955,7 +975,8 @@ void rayGen()
             break;
         }
 
-        if (hit.translucent != 0 && hit.materialId == WATER_MATERIAL)
+        // Water surfaces (and the far landscape's sea, the only opaque surface tagged as water).
+        if (hit.materialId == WATER_MATERIAL)
         {
             // Water: wave normal, Fresnel reflection, sun glint, then refract into the volume.
             float3 n = hit.geometricNormal; // faces the ray

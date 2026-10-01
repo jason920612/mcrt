@@ -54,6 +54,11 @@ public:
                        const uint8_t* occupancy);
     void enqueueRemove(int32_t x, int32_t y, int32_t z);
     void enqueueClear();
+    // See mcrt_far_terrain. Stored as a pseudo-section above the build limit (kFarSectionY), as
+    // alpha-tested geometry so the shader can drop the part inside render distance.
+    void enqueueFarTerrain(int32_t originX, int32_t originZ, uint32_t size, uint32_t spacing, int32_t seaLevel,
+                           const float* heights, const uint32_t* colors);
+    bool hasFarTerrain() const;
 
     // Render thread. Records uploads and BLAS builds for a budgeted batch of pending sections.
     // Returns true when the visible geometry changed.
@@ -96,6 +101,10 @@ private:
     };
 
     static uint64_t key(int32_t x, int32_t y, int32_t z);
+    static constexpr int32_t kFarSectionY = 64; // above any build limit
+    std::mutex farMutex_;
+    bool farQueued_ = false;
+    int32_t farX_ = 0, farZ_ = 0; // section coordinates of the current far landscape
 
     void retire(GpuSection& section, uint64_t retireValue);
     void retireAll(uint64_t retireValue);

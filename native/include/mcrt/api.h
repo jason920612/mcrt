@@ -104,6 +104,13 @@ MCRT_API void mcrt_section_remove(McrtContext* ctx, int32_t section_x, int32_t s
 // Thread-safe. Drops every section (level change, resource reload).
 MCRT_API void mcrt_sections_clear(McrtContext* ctx);
 
+// Thread-safe. Far landscape beyond render distance: a size x size heightfield centered on block
+// (origin_x, origin_z) with `spacing` blocks between samples (row-major, x fastest). heights are
+// surface heights in blocks; colors are RGBA8 sRGB surface colors, alpha 1 = water (the surface is
+// drawn at sea level). Replaces the previous far landscape; size 0 removes it.
+MCRT_API void mcrt_far_terrain(McrtContext* ctx, int32_t origin_x, int32_t origin_z, uint32_t size, uint32_t spacing,
+                               int32_t sea_level, const float* heights, const uint32_t* colors);
+
 // Render thread.
 MCRT_API void mcrt_get_stats(McrtContext* ctx, McrtStats* stats);
 

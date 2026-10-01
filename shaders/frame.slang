@@ -27,6 +27,8 @@ static const uint SKY_END = 2;
 static const uint FLAG_CAMERA_IN_WATER = 4;
 static const uint FLAG_CAMERA_IN_LAVA = 8;
 static const uint FLAG_CHECKERBOARD_LIGHTING = 16; // light half the pixels per frame, alternating
+static const uint FLAG_FAR_TERRAIN = 32;           // a far landscape continues past render distance
+static const float FAR_TERRAIN_RADIUS = 1900.0;    // blocks; it fades into the haze before its edge
 
 uint skyType(FrameUniforms f)
 {

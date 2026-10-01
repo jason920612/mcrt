@@ -78,6 +78,15 @@ MCRT_API void mcrt_sections_clear(McrtContext* ctx) {
     ctx->renderer->sections().enqueueClear();
 }
 
+MCRT_API void mcrt_far_terrain(McrtContext* ctx, int32_t origin_x, int32_t origin_z, uint32_t size, uint32_t spacing,
+                               int32_t sea_level, const float* heights, const uint32_t* colors) {
+    try {
+        ctx->renderer->sections().enqueueFarTerrain(origin_x, origin_z, size, spacing, sea_level, heights, colors);
+    } catch (const std::exception& e) {
+        setError("mcrt_far_terrain", e);
+    }
+}
+
 MCRT_API void mcrt_get_stats(McrtContext* ctx, McrtStats* stats) {
     *stats = ctx->renderer->stats();
 }

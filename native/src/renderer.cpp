@@ -726,7 +726,7 @@ bool Renderer::renderFrame(const McrtFrameInput& input, McrtFrameOutput& output)
     uniforms.taa[0] = halton(input.frame_index % 8 + 1, 2) - 0.5f;
     uniforms.taa[1] = halton(input.frame_index % 8 + 1, 3) - 0.5f;
     uniforms.taa[2] = scale;
-    uniforms.frameInfo[3] = input.flags;
+    uniforms.frameInfo[3] = input.flags | (sections_->hasFarTerrain() ? 32u : 0u); // FLAG_FAR_TERRAIN
     for (int i = 0; i < 3; ++i)
         uniforms.cameraBlock[i] = input.camera_block_pos[i];
     if (!hasPrevious_) {

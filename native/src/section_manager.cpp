@@ -47,6 +47,8 @@ uint32_t packLightColor(uint32_t emission, uint32_t rgb565) {
 // Rewrites each vertex's light word (Minecraft's light map coordinates, which the path tracer has
 // no use for) as: bits 12-15 emission level of the quad's block, bits 16-23 its PBR material id.
 constexpr uint32_t kWaterMaterial = 255; // see SectionScanner.WATER_MATERIAL
+constexpr uint32_t kFarVertexFlag = 16; // vertex light word bit 4: far landscape (see pathtrace.slang)
+constexpr uint32_t kFarWaterFlag = 32;  // bit 5: far landscape water
 
 void annotateQuads(std::vector<uint8_t>& data, const uint8_t* emission, const uint32_t* blockMaterials,
                    bool translucentLayer) {
@@ -205,7 +207,95 @@ void SectionManager::enqueueRemove(int32_t x, int32_t y, int32_t z) {
     incoming_.push_back(std::move(op));
 }
 
+void SectionManager::enqueueFarTerrain(int32_t originX, int32_t originZ, uint32_t size, uint32_t spacing,
+                                       int32_t seaLevel, const float* heights, const uint32_t* colors) {
+    std::lock_guard farLock(farMutex_);
+    if (farQueued_)
+        enqueueRemove(farX_, kFarSectionY, farZ_);
+    farQueued_ = false;
+    if (size < 2 || !heights || !colors)
+        return;
+
+    const int32_t sx = originX >> 4, sz = originZ >> 4;
+    const float baseX = float(sx * 16), baseY = float(kFarSectionY * 16), baseZ = float(sz * 16);
+    const float half = float(size - 1) * 0.5f;
+    auto sampleX = [&](uint32_t i) { return float(originX) + (float(i) - half) * float(spacing); };
+    auto sampleZ = [&](uint32_t j) { return float(originZ) + (float(j) - half) * float(spacing); };
+    const float waterY = float(seaLevel) - 0.11f; // top of the water block below sea level
+    auto heightAt = [&](uint32_t i, uint32_t j) {
+        i = std::min(i, size - 1);
+        j = std::min(j, size - 1);
+        const size_t n = size_t(j) * size + i;
+        return (colors[n] >> 24) != 0 ? waterY : heights[n];
+    };
+
+    struct FarVertex {
+        float position[3];
+        uint32_t color;
+        float oct[2];
+        uint32_t word;
+    };
+    static_assert(sizeof(FarVertex) == MCRT_VERTEX_STRIDE);
+    std::vector<FarVertex> vertices(size_t(size) * size);
+    for (uint32_t j = 0; j < size; ++j)
+        for (uint32_t i = 0; i < size; ++i) {
+            const size_t n = size_t(j) * size + i;
+            FarVertex& v = vertices[n];
+            v.position[0] = sampleX(i) - baseX;
+            v.position[1] = heightAt(i, j) - baseY;
+            v.position[2] = sampleZ(j) - baseZ;
+            const float dx = heightAt(i + 1, j) - heightAt(i > 0 ? i - 1 : 0, j);
+            const float dz = heightAt(i, j + 1) - heightAt(i, j > 0 ? j - 1 : 0);
+            float nx = -dx, ny = 2.0f * float(spacing), nz = -dz;
+            const float len = std::sqrt(nx * nx + ny * ny + nz * nz);
+            nx /= len, ny /= len, nz /= len;
+            const float l1 = std::fabs(nx) + std::fabs(ny) + std::fabs(nz);
+            v.oct[0] = nx / l1; // ny >= 0: no fold needed for the upper hemisphere
+            v.oct[1] = ny / l1;
+            const bool water = (colors[n] >> 24) != 0;
+            v.color = colors[n] | 0xFF000000u;
+            v.word = kFarVertexFlag | (water ? kFarWaterFlag : 0u);
+        }
+
+    Op op;
+    op.kind = OpKind::Update;
+    op.x = sx;
+    op.y = kFarSectionY;
+    op.z = sz;
+    const size_t quads = size_t(size - 1) * (size - 1);
+    op.cutoutVertices = uint32_t(quads * 4);
+    op.data.resize(quads * 4 * MCRT_VERTEX_STRIDE);
+    uint8_t* out = op.data.data();
+    for (uint32_t j = 0; j + 1 < size; ++j)
+        for (uint32_t i = 0; i + 1 < size; ++i) {
+            const size_t corners[4] = {size_t(j) * size + i, size_t(j + 1) * size + i, size_t(j + 1) * size + i + 1,
+                                       size_t(j) * size + i + 1};
+            for (size_t c : corners) {
+                std::memcpy(out, &vertices[c], MCRT_VERTEX_STRIDE);
+                out += MCRT_VERTEX_STRIDE;
+            }
+        }
+    {
+        std::lock_guard lock(incomingMutex_);
+        incoming_.push_back(std::move(op));
+    }
+    farQueued_ = true;
+    farX_ = sx;
+    farZ_ = sz;
+}
+
+bool SectionManager::hasFarTerrain() const {
+    for (const auto& [k, section] : resident_)
+        if (section.y == kFarSectionY)
+            return true;
+    return false;
+}
+
 void SectionManager::enqueueClear() {
+    {
+        std::lock_guard farLock(farMutex_);
+        farQueued_ = false; // the clear drops it too
+    }
     Op op;
     op.kind = OpKind::Clear;
     std::lock_guard lock(incomingMutex_);

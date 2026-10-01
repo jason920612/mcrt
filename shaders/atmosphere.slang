@@ -14,6 +14,10 @@ static const float MIE_G = 0.8;
 static const float3 OZONE_ABSORPTION = float3(0.650e-6, 1.881e-6, 0.085e-6);
 static const float ATMOSPHERE_PI = 3.14159265;
 
+// Average sky radiance per unit sun irradiance with the sun high (from a numerical integration of
+// this model), used for second-order scattering.
+static const float3 SKY_AMBIENT = float3(0.0142, 0.0217, 0.0296) * 1.5;
+
 // Viewer: a little above sea level.
 static const float3 VIEWER = float3(0.0, PLANET_RADIUS + 100.0, 0.0);
 
@@ -79,6 +83,9 @@ float3 skyScattering(float3 dir, float3 lightDir)
     float phaseM = miePhase(cosTheta);
     float3 transmittance = 1.0;
     float3 radiance = 0.0;
+    // Second-order scattering: air also scatters the (blue) skylight around it, isotropically.
+    // Single scattering alone leaves the horizon a murky green-grey; this brightens and cools it.
+    float3 skyAmbient = SKY_AMBIENT * sqrt(saturate(lightDir.y + 0.05));
     for (int i = 0; i < STEPS; ++i)
     {
         float3 p = VIEWER + dir * (dt * (float(i) + 0.5));
@@ -87,7 +94,8 @@ float3 skyScattering(float3 dir, float3 lightDir)
         float scatterM = MIE_SCATTERING * exp(-altitude / MIE_HEIGHT);
         float3 stepTransmittance = exp(-extinctionAt(altitude) * dt);
         float3 lightTransmittance = transmittanceToSpace(p, lightDir);
-        float3 inScatter = (scatterR * phaseR + scatterM * phaseM) * lightTransmittance;
+        float3 inScatter = (scatterR * phaseR + scatterM * phaseM) * lightTransmittance
+                         + (scatterR + scatterM) * skyAmbient;
         // Energy-conserving integration over the step.
         radiance += transmittance * inScatter * (1.0 - stepTransmittance) / max(extinctionAt(altitude), 1e-12);
         transmittance *= stepTransmittance;

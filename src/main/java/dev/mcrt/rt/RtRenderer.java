@@ -38,6 +38,9 @@ public final class RtRenderer {
 	private static final int DEBUG_MODE = Integer.getInteger("mcrt.debug", 0);
 	/** Light half the pixels per frame (alternating) and let the denoiser fill in; -Dmcrt.checkerboard=false to disable. */
 	private static final boolean CHECKERBOARD = !"false".equals(System.getProperty("mcrt.checkerboard"));
+	/** Far landscape past render distance (singleplayer); -Dmcrt.farTerrain=false turns it off. */
+	private static final boolean FAR_TERRAIN = !"false".equals(System.getProperty("mcrt.farTerrain"));
+	private final FarTerrain farTerrain = new FarTerrain();
 	/** Internal render resolution relative to the window; the TAA pass upscales. -Dmcrt.renderScale=0.67 etc. */
 	private static final float RENDER_SCALE = Math.clamp(Float.parseFloat(System.getProperty("mcrt.renderScale", "1.0")), 0.5f, 1.0f);
 
@@ -80,6 +83,21 @@ public final class RtRenderer {
 		synchronized (SectionCapture.LOCK) {
 			if (isActive()) {
 				bridge.sectionsClear(ctx);
+			}
+			farTerrain.invalidate();
+		}
+	}
+
+	/** Any thread: hands a sampled far landscape to the native renderer. */
+	void submitFarTerrain(int originX, int originZ, int size, int spacing, int seaLevel, float[] heights, int[] colors) {
+		synchronized (SectionCapture.LOCK) {
+			if (!isActive()) {
+				return;
+			}
+			try (Arena arena = Arena.ofConfined()) {
+				MemorySegment[] segments = new MemorySegment[2];
+				FarTerrain.copyTo(arena, heights, colors, segments);
+				bridge.farTerrain(ctx, originX, originZ, size, spacing, seaLevel, segments[0], segments[1]);
 			}
 		}
 	}
@@ -152,6 +170,9 @@ public final class RtRenderer {
 		int blockX = (int) Math.floor(camera.pos.x);
 		int blockY = (int) Math.floor(camera.pos.y);
 		int blockZ = (int) Math.floor(camera.pos.z);
+		if (FAR_TERRAIN) {
+			farTerrain.update(this, camera.pos.x, camera.pos.z);
+		}
 
 		input.set(JAVA_LONG, NativeBridge.OFF_COLOR_IMAGE, color.vkImage());
 		input.set(JAVA_LONG, NativeBridge.OFF_DEPTH_IMAGE, depth.vkImage());

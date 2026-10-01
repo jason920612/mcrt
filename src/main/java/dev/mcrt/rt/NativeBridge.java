@@ -62,6 +62,7 @@ final class NativeBridge {
 	private final MethodHandle sectionUpdate;
 	private final MethodHandle sectionRemove;
 	private final MethodHandle sectionsClear;
+	private final MethodHandle farTerrain;
 	private final MethodHandle getStats;
 	private final MethodHandle materialUpload;
 	private final MethodHandle destroy;
@@ -80,6 +81,8 @@ final class NativeBridge {
 			FunctionDescriptor.ofVoid(ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT));
 		this.sectionsClear = linker.downcallHandle(lib.findOrThrow("mcrt_sections_clear"),
 			FunctionDescriptor.ofVoid(ADDRESS));
+		this.farTerrain = linker.downcallHandle(lib.findOrThrow("mcrt_far_terrain"),
+			FunctionDescriptor.ofVoid(ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, ADDRESS, ADDRESS));
 		this.materialUpload = linker.downcallHandle(lib.findOrThrow("mcrt_material_upload"),
 			FunctionDescriptor.ofVoid(ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_LONG, JAVA_LONG));
 		this.getStats = linker.downcallHandle(lib.findOrThrow("mcrt_get_stats"),
@@ -144,6 +147,15 @@ final class NativeBridge {
 	void sectionsClear(MemorySegment ctx) {
 		try {
 			sectionsClear.invokeExact(ctx);
+		} catch (Throwable t) {
+			throw new RuntimeException(t);
+		}
+	}
+
+	void farTerrain(MemorySegment ctx, int originX, int originZ, int size, int spacing, int seaLevel,
+			MemorySegment heights, MemorySegment colors) {
+		try {
+			farTerrain.invokeExact(ctx, originX, originZ, size, spacing, seaLevel, heights, colors);
 		} catch (Throwable t) {
 			throw new RuntimeException(t);
 		}

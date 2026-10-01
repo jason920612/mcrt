@@ -75,7 +75,7 @@ float3 applyAerialPerspective(float3 color, float3 dir, float dist)
         color = color * transmittance + inScatter * (1.0 - transmittance);
         // Towards the render distance the land dissolves into the sky behind it, so there is no
         // edge of the world, just distance.
-        float renderDistance = frame.atmosphere.y;
+        float renderDistance = (frame.frameInfo.w & FLAG_FAR_TERRAIN) != 0 ? FAR_TERRAIN_RADIUS : frame.atmosphere.y;
         float edge = smoothstep(0.6 * renderDistance, 0.97 * renderDistance, length(rel.xz));
         float3 background = skyViewLut.SampleLevel(skyViewUv(skyLookupDirection(dir)), 0).rgb;
         return lerp(color, background, edge);
