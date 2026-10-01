@@ -45,10 +45,10 @@
 
 `tools/materials/materials.json` 定義兩件事：每種材質的來源（全部是 ambientCG 的 CC0 素材），以及哪些方塊的哪個面（頂面、側面、底面）使用哪種材質。`./gradlew build` 會執行 `build_materials.py`，下載素材並打包成兩張圖：
 
-- 顏色圖：RGB 是顏色，A 是高度
-- 資料圖：法線 xy、粗糙度、AO
+- 顏色＋高度（BC3）
+- 法線 xy（BC5）、粗糙度＋AO（BC5）
 
-結果輸出到 `build/generated/materials`，不納入 git。素材出處會寫進同目錄的 `CREDITS.md`。要新增材質，就在 json 裡加一筆來源和方塊對應。`scale` 是一張貼圖覆蓋幾格方塊；設了 `tinted` 的材質會依生態域顏色調色。
+每種材質輸出成一個 `.mcm` 檔：預先算好的 mipmap，並以 BC3（顏色＋高度）與兩張 BC5（法線、粗糙度＋AO）壓縮，編碼器是 `bc_encode.py`。輸出到 `build/generated/materials`，不納入 git。素材出處會寫進同目錄的 `CREDITS.md`。要新增材質，就在 json 裡加一筆來源和方塊對應。`scale` 是一張貼圖覆蓋幾格方塊；設了 `tinted` 的材質會依生態域顏色調色。
 
 ## 平滑地形
 

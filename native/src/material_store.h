@@ -3,13 +3,15 @@
 #include "deletion_queue.h"
 #include "vk_context.h"
 
+#include <array>
 #include <mutex>
 #include <vector>
 
 namespace mcrt {
 
-// PBR material textures as two 2D array images (one layer per material), plus per-material
-// parameters. Uploads arrive from Java at any time and are recorded into the next frame.
+// PBR material textures as three block-compressed 2D array images (one layer per material) with
+// precomputed mip chains (tools/materials, .mcm files), plus per-material parameters. Uploads
+// arrive from Java at any time and are recorded into the next frame.
 class MaterialStore {
 public:
     // Matches MaterialParams in pathtrace.slang.
@@ -25,15 +27,15 @@ public:
     MaterialStore(const MaterialStore&) = delete;
     MaterialStore& operator=(const MaterialStore&) = delete;
 
-    // Thread-safe. Pixels are RGBA8, size x size. count/size must match across calls.
-    void upload(uint32_t index, uint32_t count, uint32_t size, uint32_t scale, uint32_t flags, const void* albedo,
-                const void* data);
+    // Thread-safe. `file` is a whole .mcm file; count and texture size must match across calls.
+    void upload(uint32_t index, uint32_t count, uint32_t scale, uint32_t flags, const void* file, size_t bytes);
 
-    // Render thread: creates images and records pending uploads + mip generation.
+    // Render thread: creates images and records pending uploads.
     void recordUploads(VkCommandBuffer cmd, uint64_t retireValue);
 
-    VkImageView albedoView() const { return albedo_.view; }
-    VkImageView dataView() const { return data_.view; }
+    VkImageView albedoView() const { return images_[0].view; }
+    VkImageView normalView() const { return images_[1].view; }
+    VkImageView surfaceView() const { return images_[2].view; }
     VkSampler sampler() const { return sampler_; }
     const Buffer& params() const { return params_; }
 
@@ -45,14 +47,11 @@ private:
     };
     struct Pending {
         uint32_t index;
-        std::vector<uint8_t> albedo;
-        std::vector<uint8_t> data;
+        std::vector<uint8_t> payload; // the three images' mip chains, as stored in the file
     };
 
-    ArrayImage createArray(VkFormat format, uint32_t size, uint32_t layers);
+    ArrayImage createArray(VkFormat format, uint32_t size, uint32_t levels, uint32_t layers);
     void destroyArray(ArrayImage& image);
-    void recordLayerUpload(VkCommandBuffer cmd, const ArrayImage& image, uint32_t layer, VkDeviceSize stagingOffset,
-                           VkBuffer staging);
 
     VkContext& ctx_;
     DeletionQueue& deletion_;
@@ -63,14 +62,14 @@ private:
     std::vector<Params> paramsCpu_;
     uint32_t requestedCount_ = 0;
     uint32_t requestedSize_ = 0;
+    uint32_t requestedLevels_ = 0;
     bool paramsDirty_ = false;
 
     uint32_t count_ = 0;
     uint32_t size_ = 0;
-    uint32_t mipLevels_ = 1;
+    uint32_t levels_ = 0;
     bool initialized_ = false;
-    ArrayImage albedo_;
-    ArrayImage data_;
+    std::array<ArrayImage, 3> images_{}; // albedo BC3 sRGB, normal BC5, surface BC5
     Buffer params_;
 };
 

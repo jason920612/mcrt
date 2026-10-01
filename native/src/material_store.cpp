@@ -7,27 +7,31 @@ namespace mcrt {
 
 namespace {
 
-uint32_t mipCount(uint32_t size) {
-    uint32_t levels = 1;
-    while (size > 1) {
-        size >>= 1;
-        ++levels;
-    }
-    return levels;
+constexpr VkFormat kFormats[3] = {VK_FORMAT_BC3_SRGB_BLOCK, VK_FORMAT_BC5_UNORM_BLOCK, VK_FORMAT_BC5_UNORM_BLOCK};
+constexpr uint32_t kHeaderBytes = 12; // "MCM1", size, levels
+
+// BC3 and BC5 both store 16 bytes per 4x4 block.
+VkDeviceSize levelBytes(uint32_t size) {
+    return VkDeviceSize(size / 4) * (size / 4) * 16;
 }
 
-void imageBarrier(VkCommandBuffer cmd, VkImage image, VkImageLayout oldLayout, VkAccessFlags srcAccess,
-                  VkAccessFlags dstAccess, VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage,
-                  uint32_t baseMip, uint32_t mipCount, uint32_t layer, uint32_t layerCount) {
+VkDeviceSize chainBytes(uint32_t size, uint32_t levels) {
+    VkDeviceSize total = 0;
+    for (uint32_t i = 0; i < levels; ++i)
+        total += levelBytes(size >> i);
+    return total;
+}
+
+void toGeneral(VkCommandBuffer cmd, VkImage image) {
     VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-    barrier.srcAccessMask = srcAccess;
-    barrier.dstAccessMask = dstAccess;
-    barrier.oldLayout = oldLayout;
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
     barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barrier.image = image;
-    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, baseMip, mipCount, layer, layerCount};
-    vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS};
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
+                         nullptr, 1, &barrier);
 }
 
 } // namespace
@@ -41,28 +45,29 @@ MaterialStore::MaterialStore(VkContext& ctx, DeletionQueue& deletion) : ctx_(ctx
     samplerInfo.maxLod = VK_LOD_CLAMP_NONE;
     MCRT_VK_CHECK(vkCreateSampler(ctx_.device(), &samplerInfo, nullptr, &sampler_));
     // Placeholders so descriptors are valid before (or without) any material.
-    albedo_ = createArray(VK_FORMAT_R8G8B8A8_SRGB, 1, 1);
-    data_ = createArray(VK_FORMAT_R8G8B8A8_UNORM, 1, 1);
+    for (int i = 0; i < 3; ++i)
+        images_[i] = createArray(kFormats[i], 4, 1, 1);
     params_ = ctx_.createBuffer(sizeof(Params), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, MemoryKind::HostUpload);
 }
 
 MaterialStore::~MaterialStore() {
-    destroyArray(albedo_);
-    destroyArray(data_);
+    for (ArrayImage& image : images_)
+        destroyArray(image);
     ctx_.destroyBuffer(params_);
     vkDestroySampler(ctx_.device(), sampler_, nullptr);
 }
 
-MaterialStore::ArrayImage MaterialStore::createArray(VkFormat format, uint32_t size, uint32_t layers) {
+MaterialStore::ArrayImage MaterialStore::createArray(VkFormat format, uint32_t size, uint32_t levels,
+                                                     uint32_t layers) {
     VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     info.imageType = VK_IMAGE_TYPE_2D;
     info.format = format;
     info.extent = {size, size, 1};
-    info.mipLevels = mipCount(size);
+    info.mipLevels = levels;
     info.arrayLayers = layers;
     info.samples = VK_SAMPLE_COUNT_1_BIT;
     info.tiling = VK_IMAGE_TILING_OPTIMAL;
-    info.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    info.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     VmaAllocationCreateInfo allocInfo{};
     allocInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
@@ -72,7 +77,7 @@ MaterialStore::ArrayImage MaterialStore::createArray(VkFormat format, uint32_t s
     viewInfo.image = image.image;
     viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
     viewInfo.format = format;
-    viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, info.mipLevels, 0, layers};
+    viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, levels, 0, layers};
     MCRT_VK_CHECK(vkCreateImageView(ctx_.device(), &viewInfo, nullptr, &image.view));
     return image;
 }
@@ -85,17 +90,24 @@ void MaterialStore::destroyArray(ArrayImage& image) {
     image = {};
 }
 
-void MaterialStore::upload(uint32_t index, uint32_t count, uint32_t size, uint32_t scale, uint32_t flags,
-                           const void* albedo, const void* data) {
-    const size_t bytes = size_t(size) * size * 4;
-    Pending pending{index, std::vector<uint8_t>(bytes), std::vector<uint8_t>(bytes)};
-    std::memcpy(pending.albedo.data(), albedo, bytes);
-    std::memcpy(pending.data.data(), data, bytes);
+void MaterialStore::upload(uint32_t index, uint32_t count, uint32_t scale, uint32_t flags, const void* file,
+                           size_t bytes) {
+    const auto* data = static_cast<const uint8_t*>(file);
+    if (bytes < kHeaderBytes || std::memcmp(data, "MCM1", 4) != 0)
+        throw VulkanError("material " + std::to_string(index) + ": not an MCM1 file");
+    uint32_t size, levels;
+    std::memcpy(&size, data + 4, 4);
+    std::memcpy(&levels, data + 8, 4);
+    if (size < 4 || (size & (size - 1)) != 0 || levels == 0 || (size >> (levels - 1)) < 4 ||
+        bytes != kHeaderBytes + 3 * chainBytes(size, levels))
+        throw VulkanError("material " + std::to_string(index) + ": malformed MCM1 file");
 
+    Pending pending{index, std::vector<uint8_t>(data + kHeaderBytes, data + bytes)};
     std::lock_guard lock(mutex_);
-    if (count != requestedCount_ || size != requestedSize_) {
+    if (count != requestedCount_ || size != requestedSize_ || levels != requestedLevels_) {
         requestedCount_ = count;
         requestedSize_ = size;
+        requestedLevels_ = levels;
         paramsCpu_.assign(count, Params{1.0f, 0, float(size), 0.0f});
     }
     if (index < paramsCpu_.size())
@@ -104,34 +116,10 @@ void MaterialStore::upload(uint32_t index, uint32_t count, uint32_t size, uint32
     pending_.push_back(std::move(pending));
 }
 
-void MaterialStore::recordLayerUpload(VkCommandBuffer cmd, const ArrayImage& image, uint32_t layer,
-                                      VkDeviceSize stagingOffset, VkBuffer staging) {
-    VkBufferImageCopy copy{};
-    copy.bufferOffset = stagingOffset;
-    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, layer, 1};
-    copy.imageExtent = {size_, size_, 1};
-    vkCmdCopyBufferToImage(cmd, staging, image.image, VK_IMAGE_LAYOUT_GENERAL, 1, &copy);
-
-    // Mip chain by successive blits; each level reads the one just written.
-    int32_t width = int32_t(size_);
-    for (uint32_t mip = 1; mip < mipLevels_; ++mip) {
-        imageBarrier(cmd, image.image, VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
-                     VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, mip - 1, 1, layer, 1);
-        VkImageBlit blit{};
-        blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, mip - 1, layer, 1};
-        blit.srcOffsets[1] = {width, width, 1};
-        blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, mip, layer, 1};
-        width = std::max(width / 2, 1);
-        blit.dstOffsets[1] = {width, width, 1};
-        vkCmdBlitImage(cmd, image.image, VK_IMAGE_LAYOUT_GENERAL, image.image, VK_IMAGE_LAYOUT_GENERAL, 1, &blit,
-                       VK_FILTER_LINEAR);
-    }
-}
-
 void MaterialStore::recordUploads(VkCommandBuffer cmd, uint64_t retireValue) {
     std::vector<Pending> pending;
     std::vector<Params> params;
-    uint32_t count, size;
+    uint32_t count, size, levels;
     bool paramsDirty;
     {
         std::lock_guard lock(mutex_);
@@ -139,28 +127,27 @@ void MaterialStore::recordUploads(VkCommandBuffer cmd, uint64_t retireValue) {
         params = paramsCpu_;
         count = requestedCount_;
         size = requestedSize_;
+        levels = requestedLevels_;
         paramsDirty = paramsDirty_;
         paramsDirty_ = false;
     }
 
-    if (count > 0 && (count != count_ || size != size_)) {
-        ArrayImage oldAlbedo = albedo_, oldData = data_;
-        deletion_.push(retireValue, [this, oldAlbedo, oldData]() mutable {
-            destroyArray(oldAlbedo);
-            destroyArray(oldData);
+    if (count > 0 && (count != count_ || size != size_ || levels != levels_)) {
+        std::array<ArrayImage, 3> old = images_;
+        deletion_.push(retireValue, [this, old]() mutable {
+            for (ArrayImage& image : old)
+                destroyArray(image);
         });
         count_ = count;
         size_ = size;
-        mipLevels_ = mipCount(size);
-        albedo_ = createArray(VK_FORMAT_R8G8B8A8_SRGB, size, count);
-        data_ = createArray(VK_FORMAT_R8G8B8A8_UNORM, size, count);
+        levels_ = levels;
+        for (int i = 0; i < 3; ++i)
+            images_[i] = createArray(kFormats[i], size, levels, count);
         initialized_ = false;
     }
     if (!initialized_) {
-        for (const ArrayImage* image : {&albedo_, &data_})
-            imageBarrier(cmd, image->image, VK_IMAGE_LAYOUT_UNDEFINED, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
-                         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, VK_REMAINING_MIP_LEVELS,
-                         0, VK_REMAINING_ARRAY_LAYERS);
+        for (const ArrayImage& image : images_)
+            toGeneral(cmd, image.image);
         initialized_ = true;
     }
 
@@ -174,20 +161,33 @@ void MaterialStore::recordUploads(VkCommandBuffer cmd, uint64_t retireValue) {
 
     if (pending.empty())
         return;
-    const VkDeviceSize layerBytes = VkDeviceSize(size_) * size_ * 4;
-    Buffer staging = ctx_.createBuffer(layerBytes * 2 * pending.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+    const VkDeviceSize payloadBytes = 3 * chainBytes(size_, levels_);
+    Buffer staging = ctx_.createBuffer(payloadBytes * pending.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                                        MemoryKind::HostUpload);
     VkDeviceSize offset = 0;
+    std::vector<VkBufferImageCopy> regions[3];
     for (const Pending& p : pending) {
-        if (p.index >= count_ || p.albedo.size() != layerBytes)
+        if (p.index >= count_ || p.payload.size() != payloadBytes)
             continue;
-        std::memcpy(static_cast<uint8_t*>(staging.mapped) + offset, p.albedo.data(), layerBytes);
-        std::memcpy(static_cast<uint8_t*>(staging.mapped) + offset + layerBytes, p.data.data(), layerBytes);
-        recordLayerUpload(cmd, albedo_, p.index, offset, staging.buffer);
-        recordLayerUpload(cmd, data_, p.index, offset + layerBytes, staging.buffer);
-        offset += layerBytes * 2;
+        std::memcpy(static_cast<uint8_t*>(staging.mapped) + offset, p.payload.data(), payloadBytes);
+        VkDeviceSize cursor = offset;
+        for (int image = 0; image < 3; ++image) {
+            for (uint32_t level = 0; level < levels_; ++level) {
+                VkBufferImageCopy copy{};
+                copy.bufferOffset = cursor;
+                copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level, p.index, 1};
+                copy.imageExtent = {size_ >> level, size_ >> level, 1};
+                regions[image].push_back(copy);
+                cursor += levelBytes(size_ >> level);
+            }
+        }
+        offset += payloadBytes;
     }
     MCRT_VK_CHECK(vmaFlushAllocation(ctx_.allocator(), staging.allocation, 0, VK_WHOLE_SIZE));
+    for (int image = 0; image < 3; ++image)
+        if (!regions[image].empty())
+            vkCmdCopyBufferToImage(cmd, staging.buffer, images_[image].image, VK_IMAGE_LAYOUT_GENERAL,
+                                   static_cast<uint32_t>(regions[image].size()), regions[image].data());
     deletion_.push(retireValue, [this, staging]() mutable { ctx_.destroyBuffer(staging); });
 
     VkMemoryBarrier toShaders{VK_STRUCTURE_TYPE_MEMORY_BARRIER};

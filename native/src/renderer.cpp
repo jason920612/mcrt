@@ -295,12 +295,13 @@ void Renderer::createDescriptors() {
         {11, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, rgen, nullptr}, // positions
         {12, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, rgen, nullptr}, // normals (current)
         {13, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, hits, nullptr},  // material albedo array
-        {14, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, hits, nullptr},  // material data array
+        {14, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, hits, nullptr},  // material normal array
         {15, VK_DESCRIPTOR_TYPE_SAMPLER, 1, hits, nullptr},
         {16, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, hits, nullptr}, // material params
         {17, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, rgen | hits, nullptr}, // sky-view LUT
         {18, VK_DESCRIPTOR_TYPE_SAMPLER, 1, rgen | hits, nullptr},
         {19, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, rgen | hits, nullptr}, // cloud LUT
+        {20, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, hits, nullptr},         // material roughness/ao array
     };
     VkDescriptorSetLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     layoutInfo.bindingCount = static_cast<uint32_t>(std::size(bindings));
@@ -312,7 +313,7 @@ void Renderer::createDescriptors() {
         {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 5 * kFramesInFlight},
         {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 5 * kFramesInFlight},
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, kFramesInFlight},
-        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 5 * kFramesInFlight},
+        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 6 * kFramesInFlight},
         {VK_DESCRIPTOR_TYPE_SAMPLER, 3 * kFramesInFlight},
     };
     VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
@@ -562,7 +563,8 @@ void Renderer::updateDescriptors(FrameSlot& slot) {
     VkDescriptorBufferInfo lightListInfo{sections_->lightList().buffer, 0, VK_WHOLE_SIZE};
 
     VkDescriptorImageInfo materialAlbedoInfo{VK_NULL_HANDLE, materials_->albedoView(), VK_IMAGE_LAYOUT_GENERAL};
-    VkDescriptorImageInfo materialDataInfo{VK_NULL_HANDLE, materials_->dataView(), VK_IMAGE_LAYOUT_GENERAL};
+    VkDescriptorImageInfo materialDataInfo{VK_NULL_HANDLE, materials_->normalView(), VK_IMAGE_LAYOUT_GENERAL};
+    VkDescriptorImageInfo materialSurfaceInfo{VK_NULL_HANDLE, materials_->surfaceView(), VK_IMAGE_LAYOUT_GENERAL};
     VkDescriptorImageInfo materialSamplerInfo{materials_->sampler(), VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED};
     VkDescriptorBufferInfo materialParamsInfo{materials_->params().buffer, 0, VK_WHOLE_SIZE};
 
@@ -571,7 +573,7 @@ void Renderer::updateDescriptors(FrameSlot& slot) {
 
     VkDescriptorImageInfo cloudViewInfo{VK_NULL_HANDLE, cloudView_.view, VK_IMAGE_LAYOUT_GENERAL};
 
-    VkWriteDescriptorSet writes[20]{};
+    VkWriteDescriptorSet writes[21]{};
     auto write = [&](uint32_t binding, VkDescriptorType type) -> VkWriteDescriptorSet& {
         VkWriteDescriptorSet& w = writes[binding];
         w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -601,7 +603,8 @@ void Renderer::updateDescriptors(FrameSlot& slot) {
     write(17, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE).pImageInfo = &skyViewInfo;
     write(18, VK_DESCRIPTOR_TYPE_SAMPLER).pImageInfo = &skySamplerInfo;
     write(19, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE).pImageInfo = &cloudViewInfo;
-    vkUpdateDescriptorSets(ctx_->device(), 20, writes, 0, nullptr);
+    write(20, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE).pImageInfo = &materialSurfaceInfo;
+    vkUpdateDescriptorSets(ctx_->device(), 21, writes, 0, nullptr);
 }
 
 McrtStats Renderer::stats() const {

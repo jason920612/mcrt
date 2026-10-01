@@ -70,12 +70,21 @@ struct MaterialParams
 };
 static const uint MATERIAL_TINTED = 1;
 [[vk::binding(13, 0)]] Texture2DArray<float4> materialAlbedo; // sRGB view: rgb linear base color, a = height
-[[vk::binding(14, 0)]] Texture2DArray<float4> materialData;   // normal xy (OpenGL), roughness, ao
+[[vk::binding(14, 0)]] Texture2DArray<float4> materialNormal; // BC5: normal xy (OpenGL convention)
 [[vk::binding(15, 0)]] SamplerState materialSampler;
 [[vk::binding(16, 0)]] StructuredBuffer<MaterialParams> materialParams;
 [[vk::binding(17, 0)]] Texture2D<float4> skyViewLut;   // sky.slang
 [[vk::binding(18, 0)]] SamplerState skySampler;
 [[vk::binding(19, 0)]] Texture2D<float4> cloudViewLut; // sky.slang: rgb scattered, a transmittance
+[[vk::binding(20, 0)]] Texture2DArray<float4> materialSurface; // BC5: roughness, ambient occlusion
+
+// Material data as one vector: normal xy, roughness, ao.
+float4 sampleMaterialData(float3 uvLayer, float lod)
+{
+    float2 normal = materialNormal.SampleLevel(materialSampler, uvLayer, lod).xy;
+    float2 surface = materialSurface.SampleLevel(materialSampler, uvLayer, lod).xy;
+    return float4(normal, surface);
+}
 
 static const uint WATER_MATERIAL = 255; // see SectionScanner.WATER_MATERIAL
 
@@ -154,7 +163,7 @@ MaterialSample sampleTriplanar(uint materialId, float3 pos, float3 n, float dist
     if (weights.x > 0.01)
     {
         float3 uv = float3(coord.z, -coord.y, layer);
-        float4 data = materialData.SampleLevel(materialSampler, uv, lod);
+        float4 data = sampleMaterialData(uv, lod);
         float4 albedo = materialAlbedo.SampleLevel(materialSampler, uv, lod);
         result.albedo += albedo.rgb * weights.x;
         result.height += albedo.a * weights.x;
@@ -165,7 +174,7 @@ MaterialSample sampleTriplanar(uint materialId, float3 pos, float3 n, float dist
     if (weights.y > 0.01)
     {
         float3 uv = float3(coord.x, -coord.z, layer);
-        float4 data = materialData.SampleLevel(materialSampler, uv, lod);
+        float4 data = sampleMaterialData(uv, lod);
         float4 albedo = materialAlbedo.SampleLevel(materialSampler, uv, lod);
         result.albedo += albedo.rgb * weights.y;
         result.height += albedo.a * weights.y;
@@ -176,7 +185,7 @@ MaterialSample sampleTriplanar(uint materialId, float3 pos, float3 n, float dist
     if (weights.z > 0.01)
     {
         float3 uv = float3(coord.x, -coord.y, layer);
-        float4 data = materialData.SampleLevel(materialSampler, uv, lod);
+        float4 data = sampleMaterialData(uv, lod);
         float4 albedo = materialAlbedo.SampleLevel(materialSampler, uv, lod);
         result.albedo += albedo.rgb * weights.z;
         result.height += albedo.a * weights.z;
@@ -342,7 +351,7 @@ void applyMaterial(inout SurfaceSample s, uint materialId, float3 tint)
 
     uv = parallaxOffset(uv, layer, lod, n, tangent, bitangent, params.scale, distance);
     float4 albedo = materialAlbedo.SampleLevel(materialSampler, float3(uv, layer), lod);
-    float4 data = materialData.SampleLevel(materialSampler, float3(uv, layer), lod);
+    float4 data = sampleMaterialData(float3(uv, layer), lod);
 
     s.albedo = albedo.rgb;
     if ((params.flags & MATERIAL_TINTED) != 0)

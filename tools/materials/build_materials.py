@@ -1,10 +1,13 @@
 """Builds MCRT's material textures from CC0 sources.
 
 Reads tools/materials/materials.json, downloads each source once into a cache, and writes per
-material two square PNGs plus a runtime table into the output directory:
+material one GPU-ready file plus a runtime table into the output directory:
 
-  <name>_albedo.png  RGB = base color (sRGB), A = height
-  <name>_data.png    R,G = tangent-space normal (OpenGL convention), B = roughness, A = ambient occlusion
+  <name>.mcm         "MCM1", uint32 size, uint32 levels, then for each of three images every mip
+                     level (largest first), block-compressed:
+                       albedo  BC3 (sRGB): rgb = base color, a = height
+                       normal  BC5: tangent-space normal xy (OpenGL convention)
+                       surface BC5: r = roughness, g = ambient occlusion
   materials.json     material list (order = material id - 1) and block face mapping
   CREDITS.md         where every texture came from
 
@@ -19,7 +22,10 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
+import numpy as np
 from PIL import Image
+
+import bc_encode
 
 AMBIENTCG_API = "https://ambientcg.com/api/v2/full_json?id={id}&include=downloadData"
 RESOLUTION = "1K-JPG"
@@ -74,9 +80,25 @@ def build_material(name: str, spec: dict, cache: Path, out: Path, size: int) -> 
         return image.convert(mode).resize((size, size), Image.LANCZOS)
 
     r, g, b = color.convert("RGB").resize((size, size), Image.LANCZOS).split()
-    Image.merge("RGBA", (r, g, b, channel(height, fill=128))).save(out / f"{name}_albedo.png", optimize=True)
+    albedo = Image.merge("RGBA", (r, g, b, channel(height, fill=128)))
     nx, ny, _ = normal.convert("RGB").resize((size, size), Image.LANCZOS).split()
-    Image.merge("RGBA", (nx, ny, channel(roughness), channel(ao))).save(out / f"{name}_data.png", optimize=True)
+    normal_xy = Image.merge("RGB", (nx, ny, Image.new("L", (size, size), 0)))
+    surface = Image.merge("RGB", (channel(roughness), channel(ao), Image.new("L", (size, size), 0)))
+
+    # Mip chain down to 4x4 (the smallest block-compressed level we store).
+    levels = []
+    level_size = size
+    while level_size >= 4:
+        levels.append(level_size)
+        level_size //= 2
+    chunks = []
+    for encode, image, mode in ((bc_encode.encode_bc3, albedo, "RGBA"), (bc_encode.encode_bc5, normal_xy, "RGB"),
+                                (bc_encode.encode_bc5, surface, "RGB")):
+        for s in levels:
+            pixels = np.array(image.resize((s, s), Image.BOX) if s != size else image)
+            chunks.append(encode(pixels if mode == "RGBA" else pixels[..., :2]))
+    header = b"MCM1" + np.array([size, len(levels)], dtype="<u4").tobytes()
+    (out / f"{name}.mcm").write_bytes(header + b"".join(chunks))
     return asset_id
 
 

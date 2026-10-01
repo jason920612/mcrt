@@ -60,12 +60,11 @@ MCRT_API void mcrt_section_update(McrtContext* ctx, int32_t section_x, int32_t s
     }
 }
 
-MCRT_API void mcrt_material_upload(McrtContext* ctx, uint32_t index, uint32_t count, uint32_t size, uint32_t scale,
-                                   uint32_t flags, uint64_t albedo_rgba, uint64_t data_rgba) {
+MCRT_API void mcrt_material_upload(McrtContext* ctx, uint32_t index, uint32_t count, uint32_t scale, uint32_t flags,
+                                   uint64_t file, uint64_t file_bytes) {
     try {
-        ctx->renderer->materials().upload(index, count, size, scale, flags,
-                                          reinterpret_cast<const void*>(albedo_rgba),
-                                          reinterpret_cast<const void*>(data_rgba));
+        ctx->renderer->materials().upload(index, count, scale, flags, reinterpret_cast<const void*>(file),
+                                          static_cast<size_t>(file_bytes));
     } catch (const std::exception& e) {
         setError("mcrt_material_upload", e);
     }

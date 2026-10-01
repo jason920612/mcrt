@@ -88,10 +88,11 @@ MCRT_API void mcrt_section_update(McrtContext* ctx, int32_t section_x, int32_t s
                                   const uint32_t* lights, uint32_t light_count,
                                   const uint32_t* block_materials, const uint8_t* occupancy);
 
-// Thread-safe. Uploads material `index` (0-based; shaders see id index + 1) of `count`, as two
-// RGBA8 size x size images: albedo (rgb, a = height) and data (normal xy, roughness, ao).
-MCRT_API void mcrt_material_upload(McrtContext* ctx, uint32_t index, uint32_t count, uint32_t size, uint32_t scale,
-                                   uint32_t flags, uint64_t albedo_rgba, uint64_t data_rgba);
+// Thread-safe. Uploads material `index` (0-based; shaders see id index + 1) of `count` from a whole
+// .mcm file (tools/materials/build_materials.py): block-compressed mip chains of albedo+height,
+// normal and roughness+ao.
+MCRT_API void mcrt_material_upload(McrtContext* ctx, uint32_t index, uint32_t count, uint32_t scale, uint32_t flags,
+                                   uint64_t file, uint64_t file_bytes);
 
 // Thread-safe.
 MCRT_API void mcrt_section_remove(McrtContext* ctx, int32_t section_x, int32_t section_y, int32_t section_z);

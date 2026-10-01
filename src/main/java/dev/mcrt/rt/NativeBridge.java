@@ -79,7 +79,7 @@ final class NativeBridge {
 		this.sectionsClear = linker.downcallHandle(lib.findOrThrow("mcrt_sections_clear"),
 			FunctionDescriptor.ofVoid(ADDRESS));
 		this.materialUpload = linker.downcallHandle(lib.findOrThrow("mcrt_material_upload"),
-			FunctionDescriptor.ofVoid(ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_LONG, JAVA_LONG));
+			FunctionDescriptor.ofVoid(ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_LONG, JAVA_LONG));
 		this.getStats = linker.downcallHandle(lib.findOrThrow("mcrt_get_stats"),
 			FunctionDescriptor.ofVoid(ADDRESS, ADDRESS));
 		this.destroy = linker.downcallHandle(lib.findOrThrow("mcrt_destroy"),
@@ -147,9 +147,9 @@ final class NativeBridge {
 		}
 	}
 
-	void materialUpload(MemorySegment ctx, int index, int count, int size, int scale, int flags, long albedoRgba, long dataRgba) {
+	void materialUpload(MemorySegment ctx, int index, int count, int scale, int flags, long file, long fileBytes) {
 		try {
-			materialUpload.invokeExact(ctx, index, count, size, scale, flags, albedoRgba, dataRgba);
+			materialUpload.invokeExact(ctx, index, count, scale, flags, file, fileBytes);
 		} catch (Throwable t) {
 			throw new RuntimeException(t);
 		}

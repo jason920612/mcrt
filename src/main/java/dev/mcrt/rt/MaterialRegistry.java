@@ -3,7 +3,6 @@ package dev.mcrt.rt;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
-import com.mojang.blaze3d.platform.NativeImage;
 import dev.mcrt.McrtClient;
 import java.io.IOException;
 import java.io.InputStream;
@@ -99,31 +98,24 @@ public final class MaterialRegistry {
 		return blockFaces.getOrDefault(block, 0);
 	}
 
-	/** Decodes every material and hands the pixels to the native renderer. */
+	/** Hands every material's .mcm file (block-compressed mip chains) to the native renderer. */
 	void upload(NativeBridge bridge, java.lang.foreign.MemorySegment ctx) {
 		for (int i = 0; i < materials.size(); i++) {
 			Material material = materials.get(i);
-			try (NativeImage albedo = read(material.name() + "_albedo.png");
-				 NativeImage data = read(material.name() + "_data.png")) {
-				if (albedo.getWidth() != textureSize || data.getWidth() != textureSize
-					|| albedo.getHeight() != textureSize || data.getHeight() != textureSize) {
-					throw new IOException("material " + material.name() + " is not " + textureSize + "x" + textureSize);
+			try (InputStream in = MaterialRegistry.class.getResourceAsStream(ROOT + material.name() + ".mcm");
+				 java.lang.foreign.Arena arena = java.lang.foreign.Arena.ofConfined()) {
+				if (in == null) {
+					throw new IOException("missing " + material.name() + ".mcm");
 				}
-				bridge.materialUpload(ctx, i, materials.size(), textureSize, material.scale(),
-					material.tinted() ? FLAG_TINTED : 0, albedo.getPointer(), data.getPointer());
+				byte[] bytes = in.readAllBytes();
+				java.lang.foreign.MemorySegment file = arena.allocate(bytes.length);
+				java.lang.foreign.MemorySegment.copy(bytes, 0, file, java.lang.foreign.ValueLayout.JAVA_BYTE, 0, bytes.length);
+				bridge.materialUpload(ctx, i, materials.size(), material.scale(),
+					material.tinted() ? FLAG_TINTED : 0, file.address(), bytes.length);
 			} catch (IOException e) {
 				McrtClient.LOGGER.error("MCRT: failed to load material {}", material.name(), e);
 			}
 		}
 		McrtClient.LOGGER.info("MCRT: uploaded {} materials for {} blocks", materials.size(), blockFaces.size());
-	}
-
-	private static NativeImage read(String file) throws IOException {
-		try (InputStream in = MaterialRegistry.class.getResourceAsStream(ROOT + file)) {
-			if (in == null) {
-				throw new IOException("missing " + file);
-			}
-			return NativeImage.read(in);
-		}
 	}
 }
