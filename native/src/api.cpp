@@ -97,10 +97,12 @@ MCRT_API void mcrt_entities(McrtContext* ctx, const float* positions, uint32_t v
     }
 }
 
-MCRT_API void mcrt_far_terrain(McrtContext* ctx, int32_t origin_x, int32_t origin_z, uint32_t size, uint32_t spacing,
-                               int32_t sea_level, const float* heights, const uint32_t* colors) {
+MCRT_API void mcrt_far_terrain(McrtContext* ctx, uint32_t ring, int32_t origin_x, int32_t origin_z, uint32_t size,
+                               uint32_t spacing, int32_t sea_level, uint32_t hole_half_extent, const float* heights,
+                               const uint32_t* colors) {
     try {
-        ctx->renderer->sections().enqueueFarTerrain(origin_x, origin_z, size, spacing, sea_level, heights, colors);
+        ctx->renderer->sections().enqueueFarTerrain(ring, origin_x, origin_z, size, spacing, sea_level,
+                                                    hole_half_extent, heights, colors);
     } catch (const std::exception& e) {
         setError("mcrt_far_terrain", e);
     }

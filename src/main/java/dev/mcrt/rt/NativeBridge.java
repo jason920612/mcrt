@@ -88,7 +88,7 @@ final class NativeBridge {
 		this.entities = linker.downcallHandle(lib.findOrThrow("mcrt_entities"),
 			FunctionDescriptor.ofVoid(ADDRESS, ADDRESS, JAVA_INT));
 		this.farTerrain = linker.downcallHandle(lib.findOrThrow("mcrt_far_terrain"),
-			FunctionDescriptor.ofVoid(ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, ADDRESS, ADDRESS));
+			FunctionDescriptor.ofVoid(ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, ADDRESS, ADDRESS));
 		this.materialUpload = linker.downcallHandle(lib.findOrThrow("mcrt_material_upload"),
 			FunctionDescriptor.ofVoid(ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_LONG, JAVA_LONG));
 		this.getStats = linker.downcallHandle(lib.findOrThrow("mcrt_get_stats"),
@@ -174,10 +174,10 @@ final class NativeBridge {
 		}
 	}
 
-	void farTerrain(MemorySegment ctx, int originX, int originZ, int size, int spacing, int seaLevel,
-			MemorySegment heights, MemorySegment colors) {
+	void farTerrain(MemorySegment ctx, int ring, int originX, int originZ, int size, int spacing, int seaLevel,
+			int holeHalfExtent, MemorySegment heights, MemorySegment colors) {
 		try {
-			farTerrain.invokeExact(ctx, originX, originZ, size, spacing, seaLevel, heights, colors);
+			farTerrain.invokeExact(ctx, ring, originX, originZ, size, spacing, seaLevel, holeHalfExtent, heights, colors);
 		} catch (Throwable t) {
 			throw new RuntimeException(t);
 		}

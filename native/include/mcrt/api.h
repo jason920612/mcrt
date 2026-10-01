@@ -108,17 +108,20 @@ MCRT_API void mcrt_section_remove(McrtContext* ctx, int32_t section_x, int32_t s
 // Thread-safe. Drops every section (level change, resource reload).
 MCRT_API void mcrt_sections_clear(McrtContext* ctx);
 
-// Thread-safe. Far landscape beyond render distance: a size x size heightfield centered on block
-// (origin_x, origin_z) with `spacing` blocks between samples (row-major, x fastest). heights are
-// surface heights in blocks; colors are RGBA8 sRGB surface colors, alpha 1 = water (the surface is
-// drawn at sea level). Replaces the previous far landscape; size 0 removes it.
 // Render thread, before mcrt_render_frame: this frame's entity geometry (mobs, players, items),
 // quads of 4 vertices, xyz relative to the frame's camera block. Used for shadows, reflections and
 // bounce light only; Minecraft draws the entities themselves.
 MCRT_API void mcrt_entities(McrtContext* ctx, const float* positions, uint32_t vertex_count);
 
-MCRT_API void mcrt_far_terrain(McrtContext* ctx, int32_t origin_x, int32_t origin_z, uint32_t size, uint32_t spacing,
-                               int32_t sea_level, const float* heights, const uint32_t* colors);
+// Thread-safe. Far landscape beyond render distance, in rings (0 = finest): a size x size
+// heightfield centered on block (origin_x, origin_z) with `spacing` blocks between samples
+// (row-major, x fastest), leaving out quads within hole_half_extent blocks of the center (covered
+// by a finer ring). heights are surface heights in blocks; colors are RGBA8 sRGB surface colors
+// whose alpha holds flags: bit 0 water (drawn at sea level), bit 1 forest. Replaces that ring;
+// size 0 removes it.
+MCRT_API void mcrt_far_terrain(McrtContext* ctx, uint32_t ring, int32_t origin_x, int32_t origin_z, uint32_t size,
+                               uint32_t spacing, int32_t sea_level, uint32_t hole_half_extent, const float* heights,
+                               const uint32_t* colors);
 
 // Render thread.
 MCRT_API void mcrt_get_stats(McrtContext* ctx, McrtStats* stats);

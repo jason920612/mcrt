@@ -96,7 +96,8 @@ public final class RtRenderer {
 	}
 
 	/** Any thread: hands a sampled far landscape to the native renderer. */
-	void submitFarTerrain(int originX, int originZ, int size, int spacing, int seaLevel, float[] heights, int[] colors) {
+	void submitFarTerrain(int ring, int originX, int originZ, int size, int spacing, int seaLevel, int holeHalfExtent,
+			float[] heights, int[] colors) {
 		nativeUse.readLock().lock();
 		try (Arena arena = Arena.ofConfined()) {
 			if (!isActive()) {
@@ -104,7 +105,7 @@ public final class RtRenderer {
 			}
 			MemorySegment[] segments = new MemorySegment[2];
 			FarTerrain.copyTo(arena, heights, colors, segments);
-			bridge.farTerrain(ctx, originX, originZ, size, spacing, seaLevel, segments[0], segments[1]);
+			bridge.farTerrain(ctx, ring, originX, originZ, size, spacing, seaLevel, holeHalfExtent, segments[0], segments[1]);
 		} finally {
 			nativeUse.readLock().unlock();
 		}

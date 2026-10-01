@@ -62,9 +62,12 @@ public:
     void enqueueClear();
     // See mcrt_far_terrain. Stored as a pseudo-section above the build limit (kFarSectionY), as
     // alpha-tested geometry so the shader can drop the part inside render distance.
-    void enqueueFarTerrain(int32_t originX, int32_t originZ, uint32_t size, uint32_t spacing, int32_t seaLevel,
-                           const float* heights, const uint32_t* colors);
+    void enqueueFarTerrain(uint32_t ring, int32_t originX, int32_t originZ, uint32_t size, uint32_t spacing,
+                           int32_t seaLevel, uint32_t holeHalfExtent, const float* heights, const uint32_t* colors);
     bool hasFarTerrain() const;
+    // Render thread, every frame: the far landscape is opaque geometry with a hole where the real
+    // world is loaded; it is re-meshed (in the background) as the camera moves.
+    void updateFarHole(int32_t cameraX, int32_t cameraZ, float renderDistance);
 
     // A section-info slot for geometry managed elsewhere (entities); never freed.
     uint32_t reserveSlot();
@@ -117,8 +120,30 @@ private:
     static uint64_t key(int32_t x, int32_t y, int32_t z);
     static constexpr int32_t kFarSectionY = 64; // above any build limit
     std::mutex farMutex_;
-    bool farQueued_ = false;
-    int32_t farX_ = 0, farZ_ = 0; // section coordinates of the current far landscape
+    static constexpr uint32_t kFarRings = 2;
+    static constexpr uint32_t kFarTileQuads = 48; // far rings are meshed in tiles of 48x48 quads
+    struct FarRing {
+        int32_t originX = 0, originZ = 0;
+        uint32_t size = 0, spacing = 0, holeHalfExtent = 0;
+        int32_t seaLevel = 0;
+        std::vector<float> heights;
+        std::vector<uint32_t> colors;
+        uint32_t tilesPerSide() const { return (size - 2) / kFarTileQuads + 1; }
+    };
+    struct FarHole {
+        float x = 0.0f, z = 0.0f, radius = 0.0f;
+    };
+    std::shared_ptr<const FarRing> farRings_[kFarRings];
+    std::vector<std::pair<int32_t, int32_t>> farTileKeys_[kFarRings]; // section x/z of every tile
+    FarHole farHole_[kFarRings];
+    struct FarMeshJob {
+        std::shared_ptr<const FarRing> data;
+        std::future<std::vector<Op>> ops;
+    };
+    FarMeshJob farMeshJob_[kFarRings];
+    static Op buildFarTile(uint32_t ring, const FarRing& data, FarHole hole, uint32_t tileX, uint32_t tileZ);
+    // How the round hole covers a tile: 0 not at all, 1 partly, 2 entirely.
+    static int farTileCoverage(const FarRing& data, FarHole hole, uint32_t tileX, uint32_t tileZ);
 
     void retire(GpuSection& section, uint64_t retireValue);
     void retireAll(uint64_t retireValue);

@@ -29,8 +29,13 @@ import net.minecraft.world.level.levelgen.RandomState;
  * world then fades into the haze as before.
  */
 final class FarTerrain {
-	static final int SIZE = 257;       // samples per side
-	static final int SPACING = 16;     // blocks between samples: covers +-2048 blocks
+	/** Rings, coarse first (sent first, so the horizon appears quickly), each leaving a hole for the next. */
+	private record Ring(int index, int size, int spacing, int holeHalfExtent) {
+	}
+	private static final Ring[] RINGS = {
+		new Ring(1, 321, 16, 760),  // +-2560 blocks, every 16
+		new Ring(0, 385, 4, 0),     // +-768 blocks, every 4
+	};
 	static final int RECENTER = 384;   // regenerate once the player is this far from the center
 	static final int HELPERS = 3;      // extra sampling threads
 
@@ -84,50 +89,59 @@ final class FarTerrain {
 	}
 
 	private static void generate(RtRenderer renderer, ServerLevel level, int originX, int originZ) {
-		long start = System.nanoTime();
 		ChunkGenerator generator = level.getChunkSource().getGenerator();
 		RandomState random = level.getChunkSource().randomState();
 		BiomeResolver biomes = generator.getBiomeSource().createUncachedResolver(random);
 		int seaLevel = generator.getSeaLevel();
-		float[] heights = new float[SIZE * SIZE];
-		int[] colors = new int[SIZE * SIZE];
-		int half = SIZE / 2;
-		// Rows in parallel on a few low-priority threads (the generator is thread-safe: chunk
-		// generation runs on many workers).
-		java.util.concurrent.atomic.AtomicInteger nextRow = new java.util.concurrent.atomic.AtomicInteger();
-		Runnable rows = () -> {
-			BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
-			for (int j = nextRow.getAndIncrement(); j < SIZE; j = nextRow.getAndIncrement()) {
-				for (int i = 0; i < SIZE; i++) {
-					int x = originX + (i - half) * SPACING;
-					int z = originZ + (j - half) * SPACING;
-					int y = generator.getBaseHeight(x, z, Heightmap.Types.OCEAN_FLOOR_WG, level, random);
-					Holder<Biome> biome = biomes.getNoiseBiome(x >> 2, Math.max(y, seaLevel) >> 2, z >> 2);
-					heights[j * SIZE + i] = y;
-					colors[j * SIZE + i] = surfaceColor(biome, pos.set(x, y, z), y, seaLevel);
+		for (Ring ring : RINGS) {
+			long start = System.nanoTime();
+			int size = ring.size(), spacing = ring.spacing();
+			float[] heights = new float[size * size];
+			int[] colors = new int[size * size];
+			int half = size / 2;
+			// Rows in parallel on a few low-priority threads (the generator is thread-safe: chunk
+			// generation runs on many workers).
+			java.util.concurrent.atomic.AtomicInteger nextRow = new java.util.concurrent.atomic.AtomicInteger();
+			Runnable rows = () -> {
+				BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+				for (int j = nextRow.getAndIncrement(); j < size; j = nextRow.getAndIncrement()) {
+					for (int i = 0; i < size; i++) {
+						int dx = (i - half) * spacing, dz = (j - half) * spacing;
+						// Samples inside the hole are never drawn (their quads are dropped); skip the generator.
+						int hole = ring.holeHalfExtent() - spacing;
+						if (hole > 0 && Math.abs(dx) < hole && Math.abs(dz) < hole) {
+							continue;
+						}
+						int x = originX + dx;
+						int z = originZ + dz;
+						int y = generator.getBaseHeight(x, z, Heightmap.Types.OCEAN_FLOOR_WG, level, random);
+						Holder<Biome> biome = biomes.getNoiseBiome(x >> 2, Math.max(y, seaLevel) >> 2, z >> 2);
+						heights[j * size + i] = y;
+						colors[j * size + i] = surfaceColor(biome, pos.set(x, y, z), y, seaLevel);
+					}
+				}
+			};
+			Thread[] helpers = new Thread[HELPERS];
+			for (int t = 0; t < HELPERS; t++) {
+				helpers[t] = new Thread(rows, "MCRT far terrain " + t);
+				helpers[t].setDaemon(true);
+				helpers[t].setPriority(Thread.MIN_PRIORITY);
+				helpers[t].start();
+			}
+			rows.run();
+			for (Thread helper : helpers) {
+				try {
+					helper.join();
+				} catch (InterruptedException e) {
+					Thread.currentThread().interrupt();
+					return;
 				}
 			}
-		};
-		Thread[] helpers = new Thread[HELPERS];
-		for (int t = 0; t < HELPERS; t++) {
-			helpers[t] = new Thread(rows, "MCRT far terrain " + t);
-			helpers[t].setDaemon(true);
-			helpers[t].setPriority(Thread.MIN_PRIORITY);
-			helpers[t].start();
+			renderer.submitFarTerrain(ring.index(), originX, originZ, size, spacing, seaLevel, ring.holeHalfExtent(),
+				heights, colors);
+			McrtClient.LOGGER.info("MCRT: far terrain ring {} around ({}, {}) sampled in {} ms", ring.index(), originX, originZ,
+				(System.nanoTime() - start) / 1_000_000);
 		}
-		rows.run();
-		for (Thread helper : helpers) {
-			try {
-				helper.join();
-			} catch (InterruptedException e) {
-				Thread.currentThread().interrupt();
-				return;
-			}
-		}
-		long sampled = System.nanoTime();
-		renderer.submitFarTerrain(originX, originZ, SIZE, SPACING, seaLevel, heights, colors);
-		McrtClient.LOGGER.info("MCRT: far terrain around ({}, {}) sampled in {} ms", originX, originZ,
-			(sampled - start) / 1_000_000);
 	}
 
 	/** RGBA8 (r in the low byte) sRGB surface color as seen from afar; alpha 1 marks water. */
@@ -156,7 +170,8 @@ final class FarTerrain {
 			|| path.contains("grove") || path.contains("swamp") || path.contains("woodland");
 		int tint = wooded ? biome.getFoliageColor() : grass;
 		float shade = wooded ? 0.5f : 0.78f; // canopies and grass are darker than their flat color
-		return rgba((int) (((tint >> 16) & 0xFF) * shade), (int) (((tint >> 8) & 0xFF) * shade), (int) ((tint & 0xFF) * shade), 0);
+		return rgba((int) (((tint >> 16) & 0xFF) * shade), (int) (((tint >> 8) & 0xFF) * shade), (int) ((tint & 0xFF) * shade),
+			wooded ? 2 : 0);
 	}
 
 	private static int lerp(int a, int b, float t) {

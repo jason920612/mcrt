@@ -76,6 +76,7 @@ static const uint VERTEX_TERRAIN = 8;  // natural terrain
 static const uint VERTEX_FAR = 16;     // far landscape heightfield (past render distance)
 static const uint VERTEX_FAR_WATER = 32;
 static const uint VERTEX_ENTITY = 64;  // entity geometry (entity_layer.cpp)
+static const uint VERTEX_FAR_FOREST = 256;
 [[vk::binding(13, 0)]] Texture2DArray<float4> materialAlbedo; // sRGB view: rgb linear base color, a = height
 [[vk::binding(14, 0)]] Texture2DArray<float4> materialNormal; // BC5: normal xy (OpenGL convention)
 [[vk::binding(15, 0)]] SamplerState materialSampler;
@@ -224,6 +225,43 @@ void applyMacroDetail(inout SurfaceSample s, float3 world)
         albedo = lerp(albedo, albedo * float3(1.08, 1.0, 0.9), broad); // warm/cool shift
     }
     s.albedo = albedo;
+}
+
+// Far landscape: the heightfield only knows height and biome, so the look is synthesized the way
+// a painter would: rock where slopes are steep, snow above a ragged snow line, forest canopies
+// as clumps of dark crowns, and relief noise at the scales the sample spacing cannot carry.
+void shadeFarLand(inout SurfaceSample s, float3 world, bool forest)
+{
+    float3 n = s.normal;
+    // Relief: ridges a few tens of blocks wide and gullies, bending the shading normal.
+    const float e = 1.5;
+    float3 p = world * float3(1.0 / 23.0, 1.0 / 23.0, 1.0 / 23.0);
+    float h0 = macroNoise(p) + 0.5 * macroNoise(p * 2.7 + 11.0) + 0.25 * macroNoise(p * 7.1 + 23.0);
+    float hx = macroNoise(p + float3(e / 23.0, 0, 0)) + 0.5 * macroNoise((p + float3(e / 23.0, 0, 0)) * 2.7 + 11.0)
+             + 0.25 * macroNoise((p + float3(e / 23.0, 0, 0)) * 7.1 + 23.0);
+    float hz = macroNoise(p + float3(0, 0, e / 23.0)) + 0.5 * macroNoise((p + float3(0, 0, e / 23.0)) * 2.7 + 11.0)
+             + 0.25 * macroNoise((p + float3(0, 0, e / 23.0)) * 7.1 + 23.0);
+    float3 grad = float3(hx - h0, 0.0, hz - h0) / e * 9.0;
+    n = normalize(n - (grad - n * dot(grad, n)));
+
+    float3 albedo = s.albedo;
+    float steep = smoothstep(0.82, 0.62, n.y + (macroNoise(world * 0.07) - 0.5) * 0.15);
+    float3 rock = float3(0.13, 0.12, 0.11) * (0.75 + 0.5 * macroNoise(world * float3(0.02, 0.35, 0.02)));
+    if (forest && steep < 0.5)
+    {
+        // Crowns: dark clumps with lit tops.
+        float crowns = macroNoise(world * 0.45) * 0.6 + macroNoise(world * 1.3 + 7.0) * 0.4;
+        albedo *= lerp(0.45, 1.25, smoothstep(0.3, 0.8, crowns));
+        n = normalize(n + float3(macroNoise(world * 0.5 + 3.0) - 0.5, 0.0, macroNoise(world * 0.5 + 9.0) - 0.5) * 0.8);
+    }
+    albedo = lerp(albedo, rock, steep);
+    // Snow: above a ragged line on mountains, and only where it can lie.
+    float snowLine = 150.0 + (macroNoise(world * 0.004) - 0.5) * 60.0;
+    float snow = smoothstep(snowLine - 8.0, snowLine + 8.0, world.y + (macroNoise(world * 0.05) - 0.5) * 30.0)
+               * smoothstep(0.55, 0.75, n.y);
+    albedo = lerp(albedo, float3(0.85, 0.88, 0.92), snow);
+    s.albedo = albedo;
+    s.normal = n;
 }
 
 // Plains grass color: tinted materials are authored for it and shift with the biome tint.
@@ -538,7 +576,7 @@ SurfaceSample fetchSurface(BuiltInTriangleIntersectionAttributes attribs, uint f
         if (water)
             s.materialId = WATER_MATERIAL; // shaded as water: reflection, refraction into deep sea
         if (!water && s.alpha > 0.0)
-            applyMacroDetail(s, pos + float3(frame.cameraBlock.xyz));
+            shadeFarLand(s, pos + float3(frame.cameraBlock.xyz), (v0.light & VERTEX_FAR_FOREST) != 0);
         return s;
     }
     if ((v0.light & VERTEX_CARD) != 0)
@@ -650,9 +688,29 @@ void closestHitTranslucent(inout Payload p, BuiltInTriangleIntersectionAttribute
     writePayload(p, fetchSurface(attribs, 2), 1);
 }
 
+// Far landscape inside render distance lies under the real terrain, so rays meet it constantly;
+// reject those hits from one vertex word and the hit point, without sampling the surface.
+bool farLandscapeHidden()
+{
+    SectionInfo info = sections[InstanceID()];
+    BlockVertex* vertices = (BlockVertex*)info.vertexAddress;
+    uint prim = PrimitiveIndex();
+    uint word = vertices[info.cutoutFirstVertex + (prim >> 1) * 4].light;
+    if ((word & VERTEX_FAR) == 0)
+        return false;
+    float2 rel = (WorldRayOrigin() + WorldRayDirection() * RayTCurrent()).xz - frame.cameraOffset.xz;
+    float inner = frame.atmosphere.y - 12.0;
+    return dot(rel, rel) < inner * inner;
+}
+
 [shader("anyhit")]
 void anyHitCutoutPrimary(inout Payload p, BuiltInTriangleIntersectionAttributes attribs)
 {
+    if (farLandscapeHidden())
+    {
+        IgnoreHit();
+        return;
+    }
     if (fetchSurface(attribs, 1).alpha < 0.5)
         IgnoreHit();
 }
@@ -660,6 +718,11 @@ void anyHitCutoutPrimary(inout Payload p, BuiltInTriangleIntersectionAttributes 
 [shader("anyhit")]
 void anyHitCutoutShadow(inout ShadowPayload p, BuiltInTriangleIntersectionAttributes attribs)
 {
+    if (farLandscapeHidden())
+    {
+        IgnoreHit();
+        return;
+    }
     SurfaceSample s = fetchSurface(attribs, 1);
     // Grass blades are thin: a card blocks only part of the light passing it (stochastically,
     // which the denoiser turns into soft shade instead of solid blotches).
@@ -1164,9 +1227,12 @@ void rayGen()
         {
             gReservoirPixel = int2(pixel);
             // Seen through water, most of the light is absorbed: direct light is enough.
-            illumination = sawWater ? directIllumination(pos, hit.normal, hit.sectionSlot, light, seed)
-                                          + skyRadiance(float3(0, 1, 0), false) * 0.5
-                                    : surfaceIllumination(pos, hit, light, seed);
+            // Beyond render distance (the far landscape) a bounce is invisible: sky fill instead.
+            float2 fromCamera = pos.xz - frame.cameraOffset.xz;
+            bool far = dot(fromCamera, fromCamera) > frame.atmosphere.y * frame.atmosphere.y;
+            illumination = sawWater || far ? directIllumination(pos, hit.normal, hit.sectionSlot, light, seed)
+                                                 + skyRadiance(float3(0, 1, 0), false) * (far ? 0.8 : 0.5)
+                                           : surfaceIllumination(pos, hit, light, seed);
             // Specular rides along in the demodulated buffer (divided by albedo here, multiplied back in compose).
             float3 specular = keyLightSpecular(hit.normal, -dir, hit.roughness, light);
             if (any(specular > 0.0) && traceShadow(pos + hit.geometricNormal * 0.004, light.dir, 1024.0))

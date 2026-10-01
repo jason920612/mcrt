@@ -711,6 +711,7 @@ bool Renderer::renderFrame(const McrtFrameInput& input, McrtFrameOutput& output)
     }
     materials_->recordUploads(cmd, retireValue);
 
+    sections_->updateFarHole(input.camera_block_pos[0], input.camera_block_pos[2], input.render_distance);
     sections_->recordUpdates(cmd, slotIndex, retireValue, input.camera_block_pos);
     memoryBarrier(cmd, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
                   VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,

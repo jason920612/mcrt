@@ -17,8 +17,8 @@ namespace mcrt {
 
 namespace {
 
-constexpr VkDeviceSize kMaxStagingBytesPerFrame = 32ull << 20;
-constexpr size_t kMaxSectionsPerFrame = 512;
+constexpr VkDeviceSize kMaxStagingBytesPerFrame = 6ull << 20; // larger batches spread over frames (no hitches)
+constexpr size_t kMaxSectionsPerFrame = 128;
 constexpr uint32_t kInitialSlotCapacity = 16384;
 constexpr uint32_t kInitialQuadCapacity = 1u << 16;
 
@@ -52,6 +52,7 @@ uint32_t packLightColor(uint32_t emission, uint32_t rgb565) {
 constexpr uint32_t kWaterMaterial = 255; // see SectionScanner.WATER_MATERIAL
 constexpr uint32_t kFarVertexFlag = 16; // vertex light word bit 4: far landscape (see pathtrace.slang)
 constexpr uint32_t kFarWaterFlag = 32;  // bit 5: far landscape water
+constexpr uint32_t kFarForestFlag = 256; // bit 8: far landscape forest
 
 void annotateQuads(std::vector<uint8_t>& data, const uint8_t* emission, const uint32_t* blockMaterials,
                    bool translucentLayer) {
@@ -220,26 +221,138 @@ void SectionManager::enqueueRemove(int32_t x, int32_t y, int32_t z) {
     incoming_.push_back(std::move(op));
 }
 
-void SectionManager::enqueueFarTerrain(int32_t originX, int32_t originZ, uint32_t size, uint32_t spacing,
-                                       int32_t seaLevel, const float* heights, const uint32_t* colors) {
+void SectionManager::enqueueFarTerrain(uint32_t ring, int32_t originX, int32_t originZ, uint32_t size,
+                                       uint32_t spacing, int32_t seaLevel, uint32_t holeHalfExtent,
+                                       const float* heights, const uint32_t* colors) {
+    if (ring >= kFarRings)
+        return;
     std::lock_guard farLock(farMutex_);
-    if (farQueued_)
-        enqueueRemove(farX_, kFarSectionY, farZ_);
-    farQueued_ = false;
+    const int32_t sectionY = kFarSectionY + int32_t(ring);
+    for (const auto& [x, z] : farTileKeys_[ring])
+        enqueueRemove(x, sectionY, z);
+    farTileKeys_[ring].clear();
+    farRings_[ring].reset();
     if (size < 2 || !heights || !colors)
         return;
+    auto data = std::make_shared<FarRing>();
+    data->originX = originX;
+    data->originZ = originZ;
+    data->size = size;
+    data->spacing = spacing;
+    data->holeHalfExtent = holeHalfExtent;
+    data->seaLevel = seaLevel;
+    data->heights.assign(heights, heights + size_t(size) * size);
+    data->colors.assign(colors, colors + size_t(size) * size);
+    const uint32_t tiles = data->tilesPerSide();
+    std::vector<Op> ops;
+    for (uint32_t tz = 0; tz < tiles; ++tz)
+        for (uint32_t tx = 0; tx < tiles; ++tx) {
+            Op op = buildFarTile(ring, *data, farHole_[ring], tx, tz);
+            farTileKeys_[ring].push_back({op.x, op.z});
+            if (!op.data.empty())
+                ops.push_back(std::move(op));
+        }
+    {
+        std::lock_guard lock(incomingMutex_);
+        for (Op& op : ops)
+            incoming_.push_back(std::move(op));
+    }
+    farRings_[ring] = data;
+}
 
-    const int32_t sx = originX >> 4, sz = originZ >> 4;
-    const float baseX = float(sx * 16), baseY = float(kFarSectionY * 16), baseZ = float(sz * 16);
+int SectionManager::farTileCoverage(const FarRing& data, FarHole hole, uint32_t tileX, uint32_t tileZ) {
+    if (hole.radius <= 0.0f)
+        return 0;
+    const float half = float(data.size - 1) * 0.5f;
+    const uint32_t i0 = tileX * kFarTileQuads, i1 = std::min(i0 + kFarTileQuads, data.size - 1);
+    const uint32_t j0 = tileZ * kFarTileQuads, j1 = std::min(j0 + kFarTileQuads, data.size - 1);
+    const float x0 = data.originX + (float(i0) - half) * data.spacing - hole.x;
+    const float x1 = data.originX + (float(i1) - half) * data.spacing - hole.x;
+    const float z0 = data.originZ + (float(j0) - half) * data.spacing - hole.z;
+    const float z1 = data.originZ + (float(j1) - half) * data.spacing - hole.z;
+    const float nx = std::max({x0, 0.0f, -x1}), nz = std::max({z0, 0.0f, -z1}); // nearest point offset
+    const float fx = std::max(std::fabs(x0), std::fabs(x1)), fz = std::max(std::fabs(z0), std::fabs(z1));
+    const float r2 = hole.radius * hole.radius;
+    if (nx * nx + nz * nz >= r2)
+        return 0;
+    return fx * fx + fz * fz < r2 ? 2 : 1;
+}
+
+void SectionManager::updateFarHole(int32_t cameraX, int32_t cameraZ, float renderDistance) {
+    std::lock_guard farLock(farMutex_);
+    // Inside the loaded world the far landscape would only sit under the real terrain (and, being
+    // opaque, could hide it); keep a margin so the hole stays inside the loaded area until the
+    // next re-mesh, which only touches the tiles the hole's edge crosses.
+    constexpr float kMoveThreshold = 24.0f;
+    const float radius = std::max(renderDistance - kMoveThreshold - 8.0f, 0.0f);
+    for (uint32_t ring = 0; ring < kFarRings; ++ring) {
+        FarMeshJob& job = farMeshJob_[ring];
+        if (job.ops.valid() && job.ops.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+            std::vector<Op> ops = job.ops.get();
+            if (job.data == farRings_[ring]) {
+                std::lock_guard lock(incomingMutex_);
+                for (Op& op : ops)
+                    incoming_.push_back(std::move(op));
+            }
+            job.data.reset();
+        }
+        const std::shared_ptr<const FarRing> data = farRings_[ring];
+        if (!data || job.ops.valid())
+            continue;
+        const FarHole old = farHole_[ring];
+        const float dx = float(cameraX) - old.x, dz = float(cameraZ) - old.z;
+        if (dx * dx + dz * dz < kMoveThreshold * kMoveThreshold && std::fabs(old.radius - radius) < 1.0f)
+            continue;
+        const FarHole hole{float(cameraX), float(cameraZ), radius};
+        farHole_[ring] = hole;
+        std::vector<std::pair<uint32_t, uint32_t>> tiles;
+        const uint32_t perSide = data->tilesPerSide();
+        for (uint32_t tz = 0; tz < perSide; ++tz)
+            for (uint32_t tx = 0; tx < perSide; ++tx) {
+                const int before = farTileCoverage(*data, old, tx, tz);
+                const int after = farTileCoverage(*data, hole, tx, tz);
+                if (before == 1 || after == 1 || before != after)
+                    tiles.push_back({tx, tz});
+            }
+        if (tiles.empty())
+            continue;
+        job.data = data;
+        job.ops = std::async(std::launch::async, [ring, data, hole, tiles]() {
+            std::vector<Op> ops;
+            ops.reserve(tiles.size());
+            for (const auto& [tx, tz] : tiles)
+                ops.push_back(buildFarTile(ring, *data, hole, tx, tz)); // empty = removed
+            return ops;
+        });
+    }
+}
+
+SectionManager::Op SectionManager::buildFarTile(uint32_t ring, const FarRing& data, FarHole hole, uint32_t tileX,
+                                                uint32_t tileZ) {
+    const uint32_t size = data.size;
+    const uint32_t spacing = data.spacing;
+    const int32_t originX = data.originX, originZ = data.originZ;
     const float half = float(size - 1) * 0.5f;
     auto sampleX = [&](uint32_t i) { return float(originX) + (float(i) - half) * float(spacing); };
     auto sampleZ = [&](uint32_t j) { return float(originZ) + (float(j) - half) * float(spacing); };
-    const float waterY = float(seaLevel) - 0.11f; // top of the water block below sea level
+    const uint32_t i0 = tileX * kFarTileQuads, i1 = std::min(i0 + kFarTileQuads, size - 1);
+    const uint32_t j0 = tileZ * kFarTileQuads, j1 = std::min(j0 + kFarTileQuads, size - 1);
+
+    Op op;
+    op.kind = OpKind::Update;
+    op.x = int32_t(std::floor(sampleX(i0) / 16.0f));
+    op.y = kFarSectionY + int32_t(ring);
+    op.z = int32_t(std::floor(sampleZ(j0) / 16.0f));
+    const float baseX = float(op.x * 16), baseY = float(op.y * 16), baseZ = float(op.z * 16);
+
+    const float waterY = float(data.seaLevel) - 0.11f; // top of the water block below sea level
+    const float* heights = data.heights.data();
+    const uint32_t* colors = data.colors.data();
     auto heightAt = [&](uint32_t i, uint32_t j) {
         i = std::min(i, size - 1);
         j = std::min(j, size - 1);
         const size_t n = size_t(j) * size + i;
-        return (colors[n] >> 24) != 0 ? waterY : heights[n];
+        return (colors[n] >> 24) & 1 ? waterY : heights[n];
     };
 
     struct FarVertex {
@@ -249,11 +362,12 @@ void SectionManager::enqueueFarTerrain(int32_t originX, int32_t originZ, uint32_
         uint32_t word;
     };
     static_assert(sizeof(FarVertex) == MCRT_VERTEX_STRIDE);
-    std::vector<FarVertex> vertices(size_t(size) * size);
-    for (uint32_t j = 0; j < size; ++j)
-        for (uint32_t i = 0; i < size; ++i) {
+    const uint32_t w = i1 - i0 + 1, h = j1 - j0 + 1;
+    std::vector<FarVertex> vertices(size_t(w) * h);
+    for (uint32_t j = j0; j <= j1; ++j)
+        for (uint32_t i = i0; i <= i1; ++i) {
             const size_t n = size_t(j) * size + i;
-            FarVertex& v = vertices[n];
+            FarVertex& v = vertices[size_t(j - j0) * w + (i - i0)];
             v.position[0] = sampleX(i) - baseX;
             v.position[1] = heightAt(i, j) - baseY;
             v.position[2] = sampleZ(j) - baseZ;
@@ -265,36 +379,49 @@ void SectionManager::enqueueFarTerrain(int32_t originX, int32_t originZ, uint32_
             const float l1 = std::fabs(nx) + std::fabs(ny) + std::fabs(nz);
             v.oct[0] = nx / l1; // ny >= 0: no fold needed for the upper hemisphere
             v.oct[1] = ny / l1;
-            const bool water = (colors[n] >> 24) != 0;
+            const uint32_t kind = colors[n] >> 24; // bit 0 water, bit 1 forest
             v.color = colors[n] | 0xFF000000u;
-            v.word = kFarVertexFlag | (water ? kFarWaterFlag : 0u);
+            v.word = kFarVertexFlag | ((kind & 1) ? kFarWaterFlag : 0u) | ((kind & 2) ? kFarForestFlag : 0u);
         }
 
-    Op op;
-    op.kind = OpKind::Update;
-    op.x = sx;
-    op.y = kFarSectionY;
-    op.z = sz;
-    const size_t quads = size_t(size - 1) * (size - 1);
-    op.cutoutVertices = uint32_t(quads * 4);
+    // Quads covered by a finer ring (the square hole) or by the loaded world (the round hole
+    // around the camera) are left out.
+    const float squareHole = float(data.holeHalfExtent);
+    const float round2 = hole.radius * hole.radius;
+    auto skipped = [&](uint32_t i, uint32_t j) {
+        const float x0 = sampleX(i), x1 = sampleX(i + 1), z0 = sampleZ(j), z1 = sampleZ(j + 1);
+        if (squareHole > 0.0f && x0 - originX > -squareHole && x1 - originX < squareHole &&
+            z0 - originZ > -squareHole && z1 - originZ < squareHole)
+            return true;
+        if (round2 <= 0.0f)
+            return false;
+        const float xs[2] = {x0 - hole.x, x1 - hole.x}, zs[2] = {z0 - hole.z, z1 - hole.z};
+        for (float x : xs)
+            for (float z : zs)
+                if (x * x + z * z >= round2)
+                    return false;
+        return true;
+    };
+    size_t quads = 0;
+    for (uint32_t j = j0; j < j1; ++j)
+        for (uint32_t i = i0; i < i1; ++i)
+            quads += skipped(i, j) ? 0 : 1;
+    // Opaque geometry (no any-hit): the far landscape is large and rays cross it constantly.
+    op.solidVertices = uint32_t(quads * 4);
     op.data.resize(quads * 4 * MCRT_VERTEX_STRIDE);
     uint8_t* out = op.data.data();
-    for (uint32_t j = 0; j + 1 < size; ++j)
-        for (uint32_t i = 0; i + 1 < size; ++i) {
-            const size_t corners[4] = {size_t(j) * size + i, size_t(j + 1) * size + i, size_t(j + 1) * size + i + 1,
-                                       size_t(j) * size + i + 1};
+    for (uint32_t j = j0; j < j1; ++j)
+        for (uint32_t i = i0; i < i1; ++i) {
+            if (skipped(i, j))
+                continue;
+            const size_t li = i - i0, lj = j - j0;
+            const size_t corners[4] = {lj * w + li, (lj + 1) * w + li, (lj + 1) * w + li + 1, lj * w + li + 1};
             for (size_t c : corners) {
                 std::memcpy(out, &vertices[c], MCRT_VERTEX_STRIDE);
                 out += MCRT_VERTEX_STRIDE;
             }
         }
-    {
-        std::lock_guard lock(incomingMutex_);
-        incoming_.push_back(std::move(op));
-    }
-    farQueued_ = true;
-    farX_ = sx;
-    farZ_ = sz;
+    return op;
 }
 
 uint32_t SectionManager::reserveSlot() {
@@ -316,7 +443,7 @@ VkDeviceAddress SectionManager::quadIndexAddress(uint32_t quads, uint64_t retire
 
 bool SectionManager::hasFarTerrain() const {
     for (const auto& [k, section] : resident_)
-        if (section.y == kFarSectionY)
+        if (section.y >= kFarSectionY)
             return true;
     return false;
 }
@@ -324,7 +451,10 @@ bool SectionManager::hasFarTerrain() const {
 void SectionManager::enqueueClear() {
     {
         std::lock_guard farLock(farMutex_);
-        farQueued_ = false; // the clear drops it too
+        for (auto& keys : farTileKeys_)
+            keys.clear(); // the clear drops the tiles too
+        for (auto& data : farRings_)
+            data.reset();
     }
     Op op;
     op.kind = OpKind::Clear;
