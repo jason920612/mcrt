@@ -704,8 +704,9 @@ bool Renderer::renderFrame(const McrtFrameInput& input, McrtFrameOutput& output)
     std::memcpy(uniforms.moonDir, input.moon_dir, sizeof(uniforms.moonDir));
     std::memcpy(uniforms.skyColor, input.sky_color, sizeof(uniforms.skyColor));
     uniforms.params[0] = input.time_seconds;
-    uniforms.params[1] = input.pixel_spread;
+    uniforms.params[1] = input.pixel_spread / scale; // per internal pixel
     uniforms.atmosphere[0] = input.cloud_height;
+    uniforms.atmosphere[1] = input.render_distance > 0.0f ? input.render_distance : 1e6f;
     uniforms.atmosphere[2] = float(input.atlas_width);
     uniforms.atmosphere[3] = float(input.atlas_height);
     uniforms.params[2] = static_cast<float>(input.debug_mode);
@@ -752,7 +753,7 @@ bool Renderer::renderFrame(const McrtFrameInput& input, McrtFrameOutput& output)
 
     memoryBarrier(cmd, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, VK_ACCESS_SHADER_WRITE_BIT,
                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
-    denoiser_->record(cmd, slotIndex, slot.uniforms, sizeof(FrameUniforms), historyIndex_);
+    denoiser_->record(cmd, slotIndex, slot.uniforms, sizeof(FrameUniforms), historyIndex_, skyView_.view, skySampler_);
     memoryBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
                   VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
     upscaler_->record(cmd, slotIndex, slot.uniforms, sizeof(FrameUniforms), denoiser_->output().view,

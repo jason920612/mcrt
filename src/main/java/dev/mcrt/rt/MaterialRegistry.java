@@ -29,7 +29,7 @@ public final class MaterialRegistry {
 	/** Pseudo material id: smoothed geometry textured with the block's own atlas sprite. */
 	static final int ATLAS_MATERIAL = 254;
 
-	record Material(String name, int scale, boolean tinted) {
+	record Material(String name, int scale, boolean tinted, int relief) {
 	}
 
 	private final List<Material> materials = new ArrayList<>();
@@ -50,7 +50,8 @@ public final class MaterialRegistry {
 			Map<String, Integer> ids = new HashMap<>();
 			for (JsonElement element : root.getAsJsonArray("materials")) {
 				JsonObject m = element.getAsJsonObject();
-				Material material = new Material(m.get("name").getAsString(), m.get("scale").getAsInt(), m.get("tinted").getAsBoolean());
+				Material material = new Material(m.get("name").getAsString(), m.get("scale").getAsInt(), m.get("tinted").getAsBoolean(),
+					m.has("relief") ? m.get("relief").getAsInt() : 0);
 				registry.materials.add(material);
 				ids.put(material.name(), registry.materials.size());
 			}
@@ -111,7 +112,7 @@ public final class MaterialRegistry {
 				java.lang.foreign.MemorySegment file = arena.allocate(bytes.length);
 				java.lang.foreign.MemorySegment.copy(bytes, 0, file, java.lang.foreign.ValueLayout.JAVA_BYTE, 0, bytes.length);
 				bridge.materialUpload(ctx, i, materials.size(), material.scale(),
-					material.tinted() ? FLAG_TINTED : 0, file.address(), bytes.length);
+					(material.tinted() ? FLAG_TINTED : 0) | (material.relief() << 8), file.address(), bytes.length);
 			} catch (IOException e) {
 				McrtClient.LOGGER.error("MCRT: failed to load material {}", material.name(), e);
 			}

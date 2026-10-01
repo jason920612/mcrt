@@ -121,6 +121,84 @@ struct SurfaceSample
     uint materialId;
 };
 
+// ---------------------------------------------------------------------------------------------
+// Macro detail for natural terrain. Material textures repeat every couple of blocks and average
+// out to one flat color a few dozen blocks away; real ground keeps varying at every scale (patches
+// of dry and lush grass, dirty snow hollows, rock strata) and is never perfectly smooth. These
+// world-space noise fields add that variation to albedo and normals, and do not fade with distance.
+
+float macroHash(float3 p)
+{
+    p = frac(p * 0.3183099 + 0.1);
+    p *= 17.0;
+    return frac(p.x * p.y * p.z * (p.x + p.y + p.z));
+}
+
+float macroNoise(float3 x)
+{
+    float3 i = floor(x);
+    float3 f = frac(x);
+    f = f * f * (3.0 - 2.0 * f);
+    return lerp(lerp(lerp(macroHash(i), macroHash(i + float3(1, 0, 0)), f.x),
+                     lerp(macroHash(i + float3(0, 1, 0)), macroHash(i + float3(1, 1, 0)), f.x), f.y),
+                lerp(lerp(macroHash(i + float3(0, 0, 1)), macroHash(i + float3(1, 0, 1)), f.x),
+                     lerp(macroHash(i + float3(0, 1, 1)), macroHash(i + float3(1, 1, 1)), f.x), f.y), f.z);
+}
+
+// Ground relief in blocks: lumps a few blocks wide with finer bumps on top.
+float macroRelief(float3 p)
+{
+    return macroNoise(p * (1.0 / 6.0)) * 0.55 + macroNoise(p * (1.0 / 2.3) + 17.0) * 0.3
+         + macroNoise(p * (1.0 / 0.9) + 41.0) * 0.15;
+}
+
+void applyMacroDetail(inout SurfaceSample s, float3 world)
+{
+    float3 albedo = s.albedo;
+    float lum = dot(albedo, float3(0.2126, 0.7152, 0.0722));
+    bool snowy = min(albedo.r, min(albedo.g, albedo.b)) > 0.45;
+    bool vegetation = albedo.g > albedo.r * 1.08 && albedo.g > albedo.b * 1.2;
+
+    // Relief: bend the shading normal along the noise gradient.
+    const float e = 0.2;
+    float h = macroRelief(world);
+    float3 grad = float3(macroRelief(world + float3(e, 0, 0)) - h,
+                         macroRelief(world + float3(0, e, 0)) - h,
+                         macroRelief(world + float3(0, 0, e)) - h) / e;
+    float3 n = s.normal;
+    float amplitude = snowy ? 0.9 : 1.6;
+    s.normal = normalize(n - amplitude * (grad - n * dot(grad, n)));
+
+    // Large-scale tone: three octaves, from field-sized patches down to single blocks.
+    float broad = macroNoise(world * (1.0 / 29.0) + 3.0);
+    float mid = macroNoise(world * (1.0 / 8.5) + 9.0);
+    float fine = macroNoise(world * (1.0 / 2.1) + 27.0);
+    float tone = broad * 0.5 + mid * 0.3 + fine * 0.2;
+    // Hollows collect dirt and shade; crests catch light.
+    float cavity = saturate((h - 0.25) * 2.2);
+    if (snowy)
+    {
+        albedo *= lerp(0.88, 1.03, tone) * lerp(float3(0.9, 0.95, 1.0), 1.0, cavity);
+    }
+    else if (vegetation)
+    {
+        // Patches of dry, yellowed grass and of dark, lush grass.
+        float dry = smoothstep(0.5, 0.75, macroNoise(world * (1.0 / 17.0) + 61.0));
+        float lush = smoothstep(0.55, 0.8, macroNoise(world * (1.0 / 11.0) + 83.0));
+        albedo = lerp(albedo, albedo * float3(1.45, 1.12, 0.55), dry * 0.75);
+        albedo = lerp(albedo, albedo * float3(0.62, 0.8, 0.62), lush * 0.7);
+        albedo *= lerp(0.7, 1.2, tone) * lerp(0.75, 1.0, cavity);
+    }
+    else
+    {
+        // Rock, dirt, sand: strata (horizontal bands) and weathering.
+        float strata = macroNoise(float3(world.x * 0.05, world.y * 0.9, world.z * 0.05) + 5.0);
+        albedo *= lerp(0.68, 1.22, tone * 0.65 + strata * 0.35) * lerp(0.7, 1.0, cavity);
+        albedo = lerp(albedo, albedo * float3(1.08, 1.0, 0.9), broad); // warm/cool shift
+    }
+    s.albedo = albedo;
+}
+
 // Plains grass color: tinted materials are authored for it and shift with the biome tint.
 static const float3 REFERENCE_TINT = float3(0.569, 0.741, 0.349);
 
@@ -229,7 +307,9 @@ void applySmoothMaterial(inout SurfaceSample s, uint word, float3 smoothNormal, 
     float3 pos = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
     float distance = length(pos - frame.cameraOffset.xyz);
     float3 inside = pos - s.geometricNormal * 0.001;
-    float topWeight = smoothstep(0.55, 0.8, smoothNormal.y);
+    // Snow (relief kind 4) clings to steep slopes too; other tops give way to their side material sooner.
+    bool snowTop = topId != 0 && ((materialParams[topId - 1].flags >> 8) & 0xFF) == 4;
+    float topWeight = snowTop ? smoothstep(0.12, 0.4, smoothNormal.y) : smoothstep(0.38, 0.65, smoothNormal.y);
 
     MaterialSample m;
     if (topId == sideId || topWeight >= 1.0 || sideId == 0)
@@ -345,7 +425,8 @@ void applyMaterial(inout SurfaceSample s, uint materialId, float3 tint)
 
     float distance = length(pos - frame.cameraOffset.xyz);
     float cosView = max(abs(dot(n, WorldRayDirection())), 0.2);
-    float footprint = distance * frame.params.y * params.textureSize / params.scale / cosView;
+    // Isotropic filtering over-blurs surfaces seen at an angle; sqrt keeps them textured (TAA hides the aliasing).
+    float footprint = distance * frame.params.y * params.textureSize / params.scale / sqrt(cosView);
     float lod = log2(max(footprint, 1.0));
     float layer = float(materialId - 1);
 
@@ -412,10 +493,48 @@ SurfaceSample fetchSurface(BuiltInTriangleIntersectionAttributes attribs, uint f
             smoothNormal = -smoothNormal;
         s.albedo = 1.0;
         s.alpha = 1.0;
-        if ((v0.light & 2) != 0)
-            applySmoothAtlasSprite(s, v0, smoothNormal);
-        else
-            applySmoothMaterial(s, v0.light, smoothNormal, tint.rgb);
+        float3 world = WorldRayOrigin() + WorldRayDirection() * RayTCurrent() + float3(frame.cameraBlock.xyz);
+        // Each vertex carries its nearest block's materials. Blend them by barycentrics broken up
+        // with noise (seeded per material, so a boundary meanders consistently across triangles),
+        // sharpened so materials meet in irregular patches instead of smearing into each other.
+        BlockVertex corners[3] = { v0, v1, v2 };
+        float weights[3];
+        for (uint c = 0; c < 3; ++c)
+        {
+            float seed = float((corners[c].light >> 16) & 0xFFFF) * 0.137;
+            float jitter = 0.45 + 1.1 * macroNoise(world * 0.85 + seed);
+            weights[c] = pow(max(bary[c] * jitter, 1e-4), 4.0);
+        }
+        // Fold vertices that share materials.
+        for (uint c = 1; c < 3; ++c)
+            for (uint d = 0; d < c; ++d)
+                if (weights[d] > 0.0 && corners[c].light == corners[d].light)
+                {
+                    weights[d] += weights[c];
+                    weights[c] = 0.0;
+                }
+        float total = weights[0] + weights[1] + weights[2];
+        float3 albedo = 0.0, normal = 0.0;
+        float roughness = 0.0, used = 0.0;
+        for (uint c = 0; c < 3; ++c)
+        {
+            if (weights[c] < total * 0.02)
+                continue;
+            SurfaceSample m = s;
+            if ((corners[c].light & 2) != 0)
+                applySmoothAtlasSprite(m, corners[c], smoothNormal);
+            else
+                applySmoothMaterial(m, corners[c].light, smoothNormal, unpackColor(corners[c].color).rgb);
+            float w = weights[c];
+            used += w;
+            albedo += m.albedo * w;
+            normal += m.normal * w;
+            roughness += m.roughness * w;
+        }
+        s.albedo = albedo / used;
+        s.normal = normalize(normal + smoothNormal * 1e-3);
+        s.roughness = roughness / used;
+        applyMacroDetail(s, world);
         if (dot(s.normal, n) < 0.05)
             s.normal = normalize(s.normal + n * (0.05 - dot(s.normal, n)));
         return s;
@@ -520,12 +639,7 @@ float3 skyRadiance(float3 d, bool includeSunDisk)
         float3 fog = pow(max(frame.skyColor.rgb, 0.0), 2.2);
         return fog * (skyType(frame) == SKY_END ? 0.6 : 1.2);
     }
-    // Below the horizon the model's planet surface is black; past render distance that reads as a
-    // hole, so continue the horizon haze downwards instead.
-    float3 lookup = d.y < 0.03 ? normalize(float3(d.x, 0.03, d.z)) : d;
-    float3 color = skyViewLut.SampleLevel(skySampler, skyViewUv(lookup), 0).rgb;
-    if (d.y < 0.0)
-        color *= lerp(1.0, 0.55, saturate(-d.y * 4.0));
+    float3 color = skyViewLut.SampleLevel(skySampler, skyViewUv(skyLookupDirection(d)), 0).rgb;
     if (includeSunDisk)
     {
         float sunAmount = dot(d, frame.sunDir.xyz);
@@ -560,7 +674,8 @@ float3 skyWithClouds(float3 origin, float3 dir, bool includeSunDisk)
     if (dir.y < 0.01)
         return sky;
     float4 clouds = cloudViewLut.SampleLevel(skySampler, cloudViewUv(dir), 0);
-    return sky * clouds.a + clouds.rgb;
+    float nearHorizon = smoothstep(0.01, 0.15, dir.y); // far-away clouds sink into the haze
+    return lerp(sky, sky * clouds.a + clouds.rgb, nearHorizon);
 }
 
 bool traceShadow(float3 origin, float3 dir, float maxT)
@@ -767,6 +882,7 @@ void rayGen()
     float4 position = 0.0;
     float4 normal = 0.0;
     float depth = 0.0; // Minecraft clears depth to 0 (reverse Z)
+    float firstSurfaceDistance = 0.0; // camera to the first thing the ray meets (0 = sky); compose hazes by it
 
     float tMin = 0.0;
     bool layerLimitReached = false;
@@ -798,6 +914,8 @@ void rayGen()
         }
 
         float3 pos = origin + dir * hit.hitT;
+        if (firstSurfaceDistance == 0.0)
+            firstSurfaceDistance = max(length(pos - frame.cameraOffset.xyz), 1e-3);
         if (debugMode == 1 || debugMode == 2)
         {
             foreground = debugMode == 1 ? hit.albedo : hit.normal * 0.5 + 0.5;
@@ -883,7 +1001,7 @@ void rayGen()
     // w = 1 when this pixel was lit this frame; the denoiser fills the others from neighbors.
     noisyIllumination[pixel] = float4(illumination, lightThisPixel ? 1.0 : 0.0);
     albedoModulation[pixel] = float4(albedo, 0.0);
-    foregroundOutput[pixel] = float4(foreground, 0.0);
+    foregroundOutput[pixel] = float4(foreground, firstSurfaceDistance);
     positionOutput[pixel] = position;
     normalOutput[pixel] = normal;
     depthOutput[pixel.y * size.x + pixel.x] = depth;

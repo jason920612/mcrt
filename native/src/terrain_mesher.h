@@ -3,15 +3,17 @@
 #include <cstdint>
 #include <vector>
 
-// Smoothed natural terrain (visual only; collision stays blocky).
+// Natural terrain, re-sculpted (visual only; collision stays blocky).
 //
-// Surface Nets on the block grid: every exposed face of a smooth block becomes one quad whose four
-// vertices are the face's corners, each moved to a distance-weighted average of the inside/outside
-// crossings in the 4x4x4 blocks around that corner. Flat ground stays exactly flat; steps become
-// slopes and edges round off, moving no vertex by more than half a block on any axis.
+// Blocks only mark where ground is and what it is made of. The visible surface is the zero set of
+// a density field sampled every half block: a smooth vote of the surrounding blocks, displaced by
+// material-specific relief (crags and strata on rock, clumps on soil, dunes on sand), with every
+// block center pinned to its own side so the surface stays within about half a block of the
+// collision shape. Meshed with Surface Nets; vertices carry their nearest block's materials and
+// the shader blends materials across triangles.
 namespace mcrt::terrain {
 
-constexpr int kPad = 2;                 // occupancy: section plus kPad blocks on each side
+constexpr int kPad = 3;                 // occupancy: section plus kPad blocks on each side
 constexpr int kBorder = 16 + 2 * kPad;
 // kPin: see-through full blocks (ice, glass, leaves); terrain faces them like open space, but the
 // corners touching them stay put, since Minecraft culled the faces that would show a gap.
@@ -34,9 +36,17 @@ struct SpriteRect {
 void removeReplacedQuads(std::vector<uint8_t>& layer, const uint8_t* occupancy, uint32_t* tints,
                          SpriteRect* sprites);
 
-// Appends the smoothed terrain quads (Minecraft's vertex layout, see pathtrace.slang) to a layer.
-void appendSmoothTerrain(std::vector<uint8_t>& layer, const uint8_t* occupancy, const uint32_t* blockMaterials,
-                         const uint32_t* tints, const SpriteRect* sprites);
+// Terrain input (see mcrt_section_update): the kBorder^3 occupancy grid, then uint16 top|side<<8
+// materials for the same grid, then uint32 RGBA8 grass colors for its kBorder^2 columns.
+constexpr size_t kTerrainInputBytes = size_t(kBorder) * kBorder * kBorder * 3 + size_t(kBorder) * kBorder * 4;
+
+// Appends the terrain quads (Minecraft's vertex layout, see pathtrace.slang) to a layer.
+// Section coordinates make the relief noise continuous across sections.
+void appendSmoothTerrain(std::vector<uint8_t>& layer, const uint8_t* terrainInput, const SpriteRect* sprites,
+                         int sectionX, int sectionY, int sectionZ);
+
+// Relief kind of a material id (from the material flags' bits 8-15; see build_materials.py).
+void setMaterialRelief(uint32_t materialId, uint32_t relief);
 
 // Extends water surface quads (material 255 in the light word) half a block under neighbouring
 // smoothed terrain, so the shoreline becomes the curve where the smooth surface meets the water

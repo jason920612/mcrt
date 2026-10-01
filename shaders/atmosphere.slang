@@ -104,6 +104,13 @@ float2 skyViewUv(float3 dir)
     return float2(azimuth / (2.0 * ATMOSPHERE_PI) + 0.5, v);
 }
 
+// Below the horizon the model's planet surface is black; past render distance that reads as a
+// hole, so the sky there continues the horizon haze. Terrain fades into the same color.
+float3 skyLookupDirection(float3 d)
+{
+    return d.y < 0.03 ? normalize(float3(d.x, 0.03, d.z)) : d;
+}
+
 float3 skyViewDirection(float2 uv)
 {
     float azimuth = (uv.x - 0.5) * 2.0 * ATMOSPHERE_PI;

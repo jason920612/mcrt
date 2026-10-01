@@ -28,7 +28,7 @@ public:
     // Records the denoise + compose passes. Expects the path tracer's G-buffer writes to be visible
     // to compute shaders. The result lands in output().
     void record(VkCommandBuffer cmd, uint32_t slot, const Buffer& frameUniforms, VkDeviceSize uniformSize,
-                uint32_t historyIndex);
+                uint32_t historyIndex, VkImageView skyView, VkSampler skySampler);
 
     // G-buffer written by the path tracer.
     const Image& noisyIllumination() const { return noisy_; }

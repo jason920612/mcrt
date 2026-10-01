@@ -27,7 +27,7 @@ final class SectionScanner {
 	// Material id reserved for water surfaces (all faces); shaders render it as physical water.
 	static final int WATER_MATERIAL = 255;
 	private static final int WATER_FACES = WATER_MATERIAL | (WATER_MATERIAL << 8) | (WATER_MATERIAL << 16);
-	static final int PAD = 2;      // occupancy covers the section plus PAD blocks on every side
+	static final int PAD = 3;      // occupancy covers the section plus PAD blocks on every side
 	static final int BORDER = 16 + 2 * PAD;
 
 	private static final Map<Block, Integer> LIGHT_COLORS = new ConcurrentHashMap<>();
@@ -128,8 +128,47 @@ final class SectionScanner {
 					}
 				}
 			}
+			occupancy = appendTerrainInfo(region, pos, occupancy, baseX, baseY, baseZ, registry);
 		}
 		return new Result(emitters == null ? new int[0] : Arrays.copyOf(emitters, emitterCount), materials, occupancy);
+	}
+
+	/**
+	 * Terrain mesher input past the occupancy grid (see api.h): top|side material (uint16) of every
+	 * smooth block in the padded grid, then the grass color of every padded column (uint32 RGBA8),
+	 * so neighboring sections derive identical terrain along their shared faces.
+	 */
+	private static byte[] appendTerrainInfo(RenderSectionRegion region, BlockPos.MutableBlockPos pos, byte[] occupancy,
+			int baseX, int baseY, int baseZ, MaterialRegistry registry) {
+		final int cells = BORDER * BORDER * BORDER;
+		java.nio.ByteBuffer out = java.nio.ByteBuffer.allocate(cells + cells * 2 + BORDER * BORDER * 4)
+			.order(java.nio.ByteOrder.LITTLE_ENDIAN);
+		out.put(occupancy);
+		int snow = registry.snowMaterial();
+		for (int y = 0; y < BORDER; y++) {
+			for (int z = 0; z < BORDER; z++) {
+				for (int x = 0; x < BORDER; x++) {
+					int i = y * BORDER * BORDER + z * BORDER + x;
+					int faces = 0;
+					if (occupancy[i] == SMOOTH) {
+						BlockState state = region.getBlockState(pos.set(baseX + x - PAD, baseY + y - PAD, baseZ + z - PAD));
+						faces = isDeepSnow(state) ? snow | (snow << 8) : registry.faces(state.getBlock()) & 0xFFFF;
+						if (y + 1 < BORDER && occupancy[i + BORDER * BORDER] == COVER && snow != 0) {
+							faces = (faces & ~0xFF) | snow;
+						}
+					}
+					out.putShort((short) faces);
+				}
+			}
+		}
+		for (int z = 0; z < BORDER; z++) {
+			for (int x = 0; x < BORDER; x++) {
+				int rgb = net.minecraft.client.renderer.BiomeColors.getAverageGrassColor(region,
+					pos.set(baseX + x - PAD, baseY + 8, baseZ + z - PAD));
+				out.putInt(((rgb >> 16) & 0xFF) | (rgb & 0xFF00) | ((rgb & 0xFF) << 16) | 0xFF000000);
+			}
+		}
+		return out.array();
 	}
 
 	private static byte classify(RenderSectionRegion region, BlockPos.MutableBlockPos pos, int x, int y, int z,

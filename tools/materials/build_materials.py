@@ -31,6 +31,9 @@ AMBIENTCG_API = "https://ambientcg.com/api/v2/full_json?id={id}&include=download
 RESOLUTION = "1K-JPG"
 
 
+# Terrain relief (native/src/terrain_mesher.cpp): how smoothed terrain of this material is sculpted.
+RELIEF_KINDS = {"none": 0, "soil": 1, "rock": 2, "sand": 3, "snow": 4}
+
 def fetch(url: str) -> bytes:
     request = urllib.request.Request(url, headers={"User-Agent": "mcrt-material-builder"})
     with urllib.request.urlopen(request, timeout=120) as response:
@@ -118,7 +121,8 @@ def main() -> int:
     for name, spec in config["materials"].items():
         print(f"material {name}")
         asset_id = build_material(name, spec, args.cache, args.output, args.size)
-        materials.append({"name": name, "scale": spec.get("scale", 1), "tinted": bool(spec.get("tinted", False))})
+        materials.append({"name": name, "scale": spec.get("scale", 1), "tinted": bool(spec.get("tinted", False)),
+                          "relief": RELIEF_KINDS[spec.get("relief", "none")]})
         credits.append(f"- `{name}`: ambientCG [{asset_id}](https://ambientcg.com/view?id={asset_id}), CC0")
 
     names = {m["name"] for m in materials}

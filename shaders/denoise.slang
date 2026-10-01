@@ -5,6 +5,7 @@
 // so texture detail never gets blurred; compose multiplies albedo back in.
 
 #include "frame.slang"
+#include "atmosphere.slang"
 
 struct PassParams
 {
@@ -29,6 +30,62 @@ struct PassParams
 [[vk::binding(10, 0)]] ConstantBuffer<FrameUniforms> frame;
 [[vk::binding(11, 0)]] RWStructuredBuffer<float> exposureState;              // [0] exposure, [1] avg luminance, [2] last time
 [[vk::binding(12, 0)]] RWStructuredBuffer<float> luminancePartials;          // one log-luminance sum per compose group
+[[vk::binding(13, 0)]] Sampler2D<float4> skyViewLut;                         // sky.slang
+
+// Aerial perspective: haze that thickens with distance and thins with altitude, lit like the
+// horizon sky in that direction (so it picks up the sun's glow and the time of day's colors).
+static const float HAZE_DENSITY = 0.0028;     // extinction per block at sea level
+static const float HAZE_SCALE_HEIGHT = 48.0;  // blocks
+static const float HAZE_SEA_LEVEL = 63.0;
+static const float3 HAZE_TINT = float3(0.82, 0.93, 1.12); // blue scatters more: distant land turns blue
+
+float hazeDensityAt(float y)
+{
+    return exp(-(y - HAZE_SEA_LEVEL) / HAZE_SCALE_HEIGHT);
+}
+
+// View ray direction of a pixel, as the path tracer generated it (jitter included).
+float3 pixelViewDirection(int2 p)
+{
+    float2 ndc = ((float2(p) + 0.5 + frame.taa.xy) / float2(screenSize())) * 2.0 - 1.0;
+    float4 a = transformColumns(frame.invViewProj, float4(ndc, 1.0, 1.0));
+    float4 b = transformColumns(frame.invViewProj, float4(ndc, 0.5, 1.0));
+    float3 pa = a.xyz / a.w, pb = b.xyz / b.w;
+    return dot(pa, pa) < dot(pb, pb) ? normalize(pb - pa) : normalize(pa - pb);
+}
+
+float3 applyAerialPerspective(float3 color, float3 dir, float dist)
+{
+    if ((frame.frameInfo.w & (FLAG_CAMERA_IN_WATER | FLAG_CAMERA_IN_LAVA)) != 0)
+        return color;
+    float3 rel = dir * dist;
+    float3 inScatter;
+    float opticalDepth;
+    if (skyType(frame) == SKY_OVERWORLD)
+    {
+        // Exponential height fog integrated along the ray.
+        float y0 = float(frame.cameraBlock.y) + frame.cameraOffset.y;
+        float dy = rel.y / HAZE_SCALE_HEIGHT;
+        float heightFactor = abs(dy) > 1e-3 ? (1.0 - exp(-dy)) / dy : 1.0 - 0.5 * dy;
+        float density = HAZE_DENSITY * (1.0 + frame.params.w * 3.0); // rain thickens it
+        opticalDepth = density * hazeDensityAt(y0) * heightFactor * dist;
+        float3 lookup = normalize(float3(dir.x, max(dir.y, 0.02) * 0.5 + 0.02, dir.z));
+        inScatter = skyViewLut.SampleLevel(skyViewUv(lookup), 0).rgb;
+        float3 transmittance = exp(-opticalDepth * HAZE_TINT);
+        color = color * transmittance + inScatter * (1.0 - transmittance);
+        // Towards the render distance the land dissolves into the sky behind it, so there is no
+        // edge of the world, just distance.
+        float renderDistance = frame.atmosphere.y;
+        float edge = smoothstep(0.6 * renderDistance, 0.97 * renderDistance, length(rel.xz));
+        float3 background = skyViewLut.SampleLevel(skyViewUv(skyLookupDirection(dir)), 0).rgb;
+        return lerp(color, background, edge);
+    }
+    // Nether / End: thick dimension fog.
+    float3 fog = pow(max(frame.skyColor.rgb, 0.0), 2.2) * (skyType(frame) == SKY_END ? 0.6 : 1.2);
+    float fogDensity = skyType(frame) == SKY_END ? 0.004 : 0.009;
+    float transmittance = exp(-fogDensity * dist);
+    return color * transmittance + fog * (1.0 - transmittance);
+}
 
 static const float MAX_HISTORY = 48.0;
 
@@ -245,6 +302,9 @@ void compose(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint gr
     {
         float3 illumination = pass.readFromA != 0 ? filterA[p].rgb : filterB[p].rgb;
         float3 color = foreground[p].rgb + albedoModulation[p].rgb * illumination;
+        float firstSurfaceDistance = foreground[p].w;
+        if (firstSurfaceDistance > 0.0 && frame.params.z == 0.0)
+            color = applyAerialPerspective(color, pixelViewDirection(p), firstSurfaceDistance);
         logLuminance = log(max(luminance(color), 1e-4));
 
         float exposure = frame.params.z != 0.0 ? 1.0 : exposureState[0];

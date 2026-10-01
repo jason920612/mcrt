@@ -62,6 +62,7 @@ void Denoiser::createPipelines() {
         {10, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, cs, nullptr},
         {11, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, cs, nullptr}, // exposure state
         {12, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, cs, nullptr}, // luminance partials
+        {13, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, cs, nullptr}, // sky-view LUT (aerial perspective)
     };
     VkDescriptorSetLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     layoutInfo.bindingCount = static_cast<uint32_t>(std::size(bindings));
@@ -72,6 +73,7 @@ void Denoiser::createPipelines() {
         {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 13 * kFramesInFlight},
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, kFramesInFlight},
         {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2 * kFramesInFlight},
+        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kFramesInFlight},
     };
     VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     poolInfo.maxSets = kFramesInFlight;
@@ -197,7 +199,7 @@ void Denoiser::recordTargetInit(VkCommandBuffer cmd) {
 }
 
 void Denoiser::record(VkCommandBuffer cmd, uint32_t slot, const Buffer& frameUniforms, VkDeviceSize uniformSize,
-                      uint32_t historyIndex) {
+                      uint32_t historyIndex, VkImageView skyView, VkSampler skySampler) {
     VkDescriptorSet set = sets_[slot];
     auto storage = [](const Image& image) { return VkDescriptorImageInfo{VK_NULL_HANDLE, image.view, VK_IMAGE_LAYOUT_GENERAL}; };
     VkDescriptorImageInfo noisy = storage(noisy_), positions = storage(positions_);
@@ -210,7 +212,9 @@ void Denoiser::record(VkCommandBuffer cmd, uint32_t slot, const Buffer& frameUni
     VkDescriptorBufferInfo exposure{exposureState_.buffer, 0, VK_WHOLE_SIZE};
     VkDescriptorBufferInfo partials{luminancePartials_.buffer, 0, VK_WHOLE_SIZE};
 
-    VkWriteDescriptorSet writes[13]{};
+    VkDescriptorImageInfo sky{skySampler, skyView, VK_IMAGE_LAYOUT_GENERAL};
+
+    VkWriteDescriptorSet writes[14]{};
     auto write = [&](uint32_t binding, VkDescriptorType type, uint32_t count) -> VkWriteDescriptorSet& {
         VkWriteDescriptorSet& w = writes[binding];
         w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -234,7 +238,8 @@ void Denoiser::record(VkCommandBuffer cmd, uint32_t slot, const Buffer& frameUni
     write(10, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1).pBufferInfo = &uniforms;
     write(11, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1).pBufferInfo = &exposure;
     write(12, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1).pBufferInfo = &partials;
-    vkUpdateDescriptorSets(ctx_.device(), 13, writes, 0, nullptr);
+    write(13, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1).pImageInfo = &sky;
+    vkUpdateDescriptorSets(ctx_.device(), 14, writes, 0, nullptr);
 
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout_, 0, 1, &set, 0, nullptr);
     auto push = [&](uint32_t stepSize, uint32_t readFromA) {

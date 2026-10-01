@@ -50,6 +50,7 @@ final class NativeBridge {
 	static final long OFF_PIXEL_SPREAD = 280;
 	static final long OFF_CLOUD_HEIGHT = 284;
 	static final long OFF_RENDER_SCALE = 288;
+	static final long OFF_RENDER_DISTANCE = 292;
 
 	static final long FRAME_OUTPUT_SIZE = 24;
 	static final long OFF_OUT_COMMAND_BUFFER = 0;

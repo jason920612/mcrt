@@ -178,7 +178,7 @@ void SectionManager::enqueueUpdate(int32_t x, int32_t y, int32_t z, const void* 
     for (int i = 0; i < 3; ++i)
         annotateQuads(layers[i], op.lights.empty() ? nullptr : emission, blockMaterials, i == 2);
     if (occupancy) {
-        terrain::appendSmoothTerrain(layers[0], occupancy, blockMaterials, tints.data(), sprites.data());
+        terrain::appendSmoothTerrain(layers[0], occupancy, sprites.data(), x, y, z);
         terrain::extendWaterUnderShore(layers[2], occupancy);
     }
     if (!looks.empty())

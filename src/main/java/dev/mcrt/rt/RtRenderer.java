@@ -186,6 +186,7 @@ public final class RtRenderer {
 		input.set(JAVA_FLOAT, NativeBridge.OFF_PIXEL_SPREAD, 2f / (color.getHeight(0) * Math.abs(projection.m11())));
 		input.set(JAVA_FLOAT, NativeBridge.OFF_CLOUD_HEIGHT, level.cloudHeight);
 		input.set(JAVA_FLOAT, NativeBridge.OFF_RENDER_SCALE, RENDER_SCALE);
+		input.set(JAVA_FLOAT, NativeBridge.OFF_RENDER_DISTANCE, Minecraft.getInstance().options.getEffectiveRenderDistance() * 16.0f);
 
 		int result = bridge.renderFrame(ctx, input, output);
 		if (result < 0) {

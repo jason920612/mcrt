@@ -18,6 +18,7 @@ public class McrtClient implements ClientModInitializer {
 	/** Dev aid: -Dmcrt.devSpin=1.5 turns the player this many degrees per tick, to test motion. */
 	private static final float DEV_SPIN = Float.parseFloat(System.getProperty("mcrt.devSpin", "0"));
 	private IntegratedServer devSetupAppliedTo;
+	private int devSetupDelay;
 
 	@Override
 	public void onInitializeClient() {
@@ -36,7 +37,12 @@ public class McrtClient implements ClientModInitializer {
 
 	private void applyDevSetup(Minecraft minecraft) {
 		IntegratedServer server = minecraft.getSingleplayerServer();
-		if (server == null || server == devSetupAppliedTo || minecraft.level == null) {
+		if (server == null || server == devSetupAppliedTo || minecraft.level == null || minecraft.player == null) {
+			devSetupDelay = 0;
+			return;
+		}
+		// Give the server a moment to place the player before teleporting it around.
+		if (++devSetupDelay < 40) {
 			return;
 		}
 		devSetupAppliedTo = server;
