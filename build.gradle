@@ -1,0 +1,77 @@
+plugins {
+	id 'net.fabricmc.fabric-loom' version "${loom_version}"
+}
+
+version = project.mod_version
+group = project.maven_group
+
+base {
+	archivesName = project.archives_base_name
+}
+
+dependencies {
+	minecraft "com.mojang:minecraft:${project.minecraft_version}"
+	implementation "net.fabricmc:fabric-loader:${project.loader_version}"
+	implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+}
+
+// ---- Native renderer (C++ / CMake) -------------------------------------------------
+def nativeDir = file("native")
+def nativeBuildDir = layout.buildDirectory.dir("native").get().asFile
+def nativeBuildType = project.native_build_type
+def nativeOutDir = layout.buildDirectory.dir("generated/native-resources").get().asFile
+
+tasks.register('configureNative', Exec) {
+	inputs.file("native/CMakeLists.txt")
+	outputs.file(new File(nativeBuildDir, "CMakeCache.txt"))
+	commandLine 'cmake', '-S', nativeDir.absolutePath, '-B', nativeBuildDir.absolutePath, '-G', 'Visual Studio 17 2022', '-A', 'x64'
+}
+
+tasks.register('buildNative', Exec) {
+	dependsOn 'configureNative'
+	inputs.dir("native")
+	inputs.dir("shaders")
+	outputs.dir(nativeOutDir)
+	commandLine 'cmake', '--build', nativeBuildDir.absolutePath, '--config', nativeBuildType, '--parallel'
+	doLast {
+		copy {
+			from new File(nativeBuildDir, "${nativeBuildType}/mcrt_native.dll")
+			into new File(nativeOutDir, "natives/windows-x64")
+		}
+	}
+}
+
+sourceSets.main.resources.srcDir(nativeOutDir)
+
+processResources {
+	dependsOn 'buildNative'
+	def version = project.version
+	inputs.property "version", version
+	filesMatching("fabric.mod.json") {
+		expand "version": version
+	}
+}
+
+tasks.withType(JavaCompile).configureEach {
+	it.options.release = 25
+}
+
+java {
+	sourceCompatibility = JavaVersion.VERSION_25
+	targetCompatibility = JavaVersion.VERSION_25
+}
+
+loom {
+	runs {
+		client {
+			// FFM downcalls into our native library
+			vmArgs '--enable-native-access=ALL-UNNAMED'
+			// ./gradlew runClient -PmcrtDebug=1 for the ray direction debug view
+			vmArgs "-Dmcrt.debug=${project.findProperty('mcrtDebug') ?: 0}"
+			// ./gradlew runClient -PmcrtDevTime=6000 pins singleplayer time of day (noon)
+			if (project.hasProperty('mcrtDevTime')) {
+				vmArgs "-Dmcrt.devTime=${project.property('mcrtDevTime')}"
+			}
+		}
+	}
+}

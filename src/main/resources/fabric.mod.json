@@ -1,0 +1,20 @@
+{
+	"schemaVersion": 1,
+	"id": "mcrt",
+	"version": "${version}",
+	"name": "MCRT",
+	"description": "Path-traced, realistic renderer for Minecraft on the Vulkan backend.",
+	"authors": ["jason"],
+	"license": "All-Rights-Reserved",
+	"environment": "client",
+	"entrypoints": {
+		"client": ["dev.mcrt.McrtClient"]
+	},
+	"mixins": ["mcrt.mixins.json"],
+	"depends": {
+		"fabricloader": ">=0.19.5",
+		"minecraft": "~26.3",
+		"java": ">=25",
+		"fabric-api": "*"
+	}
+}

@@ -1,0 +1,9 @@
+build/
+.gradle/
+run/
+out/
+*.iml
+.idea/
+.vscode/
+tools/slang/
+native/out/

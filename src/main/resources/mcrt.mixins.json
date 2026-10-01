@@ -1,0 +1,16 @@
+{
+	"required": true,
+	"package": "dev.mcrt.mixin",
+	"compatibilityLevel": "JAVA_21",
+	"client": [
+		"FrontendGpuDeviceAccessor",
+		"GameRendererMixin",
+		"LevelRendererMixin",
+		"RenderSectionMixin",
+		"SectionCompileTaskMixin",
+		"VulkanFeatureSetsMixin"
+	],
+	"injectors": {
+		"defaultRequire": 1
+	}
+}
