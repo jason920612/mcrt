@@ -1,6 +1,7 @@
 #include "section_manager.h"
 
 #include "mcrt/api.h"
+#include "terrain_mesher.h"
 
 #include <algorithm>
 #include <cmath>
@@ -46,40 +47,19 @@ void annotateQuads(std::vector<uint8_t>& data, const uint8_t* emission, const ui
     const size_t quads = data.size() / (size_t(MCRT_VERTEX_STRIDE) * 4);
     for (size_t q = 0; q < quads; ++q) {
         uint8_t* quad = data.data() + q * MCRT_VERTEX_STRIDE * 4;
-        float p[4][3];
-        for (int v = 0; v < 4; ++v)
-            std::memcpy(p[v], quad + v * MCRT_VERTEX_STRIDE, sizeof(p[v]));
-        float e1[3], e2[3], n[3], c[3];
-        for (int i = 0; i < 3; ++i) {
-            e1[i] = p[1][i] - p[0][i];
-            e2[i] = p[2][i] - p[0][i];
-            c[i] = (p[0][i] + p[1][i] + p[2][i] + p[3][i]) * 0.25f;
+        float normal[3];
+        const int local = terrain::quadBlock(quad, normal);
+        uint32_t word = 0;
+        if (local >= 0) {
+            const uint32_t level = emission ? emission[local] : 0;
+            uint32_t material = 0;
+            if (blockMaterials) {
+                // Face role from the outward normal: top, bottom or side.
+                const uint32_t shift = normal[1] > 0.7f ? 0 : (normal[1] < -0.7f ? 16 : 8);
+                material = (blockMaterials[local] >> shift) & 0xFF;
+            }
+            word = (level << 12) | (material << 16);
         }
-        n[0] = e1[1] * e2[2] - e1[2] * e2[1];
-        n[1] = e1[2] * e2[0] - e1[0] * e2[2];
-        n[2] = e1[0] * e2[1] - e1[1] * e2[0];
-        float len = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
-        const uint32_t cleared = 0;
-        for (int v = 0; v < 4; ++v)
-            std::memcpy(quad + v * MCRT_VERTEX_STRIDE + 24, &cleared, sizeof(cleared));
-        if (len < 1e-8f)
-            continue;
-        // Minecraft quads wind counter-clockwise seen from outside, so -n points into the block.
-        int b[3];
-        for (int i = 0; i < 3; ++i)
-            b[i] = static_cast<int>(std::floor(c[i] - n[i] / len * 0.02f));
-        if (b[0] < 0 || b[0] > 15 || b[1] < 0 || b[1] > 15 || b[2] < 0 || b[2] > 15)
-            continue;
-        const uint32_t local = (b[1] << 8) | (b[2] << 4) | b[0];
-        const uint32_t level = emission ? emission[local] : 0;
-        uint32_t material = 0;
-        if (blockMaterials) {
-            // Face role from the outward normal: top, bottom or side.
-            const float ny = n[1] / len;
-            const uint32_t shift = ny > 0.7f ? 0 : (ny < -0.7f ? 16 : 8);
-            material = (blockMaterials[local] >> shift) & 0xFF;
-        }
-        const uint32_t word = (level << 12) | (material << 16);
         for (int v = 0; v < 4; ++v)
             std::memcpy(quad + v * MCRT_VERTEX_STRIDE + 24, &word, sizeof(word));
     }
@@ -132,7 +112,7 @@ uint64_t SectionManager::key(int32_t x, int32_t y, int32_t z) {
 void SectionManager::enqueueUpdate(int32_t x, int32_t y, int32_t z, const void* solid, uint32_t solidVertices,
                                    const void* cutout, uint32_t cutoutVertices, const void* translucent,
                                    uint32_t translucentVertices, const uint32_t* lights, uint32_t lightCount,
-                                   const uint32_t* blockMaterials) {
+                                   const uint32_t* blockMaterials, const uint8_t* occupancy) {
     // Only whole quads are meaningful.
     solidVertices &= ~3u;
     cutoutVertices &= ~3u;
@@ -143,20 +123,15 @@ void SectionManager::enqueueUpdate(int32_t x, int32_t y, int32_t z, const void* 
     op.x = x;
     op.y = y;
     op.z = z;
-    op.solidVertices = solid ? solidVertices : 0;
-    op.cutoutVertices = cutout ? cutoutVertices : 0;
-    op.translucentVertices = translucent ? translucentVertices : 0;
-    op.data.resize(size_t(op.solidVertices + op.cutoutVertices + op.translucentVertices) * MCRT_VERTEX_STRIDE);
-    uint8_t* dst = op.data.data();
-    auto append = [&dst](const void* src, uint32_t vertices) {
-        if (vertices == 0)
-            return;
-        std::memcpy(dst, src, size_t(vertices) * MCRT_VERTEX_STRIDE);
-        dst += size_t(vertices) * MCRT_VERTEX_STRIDE;
+    auto copyLayer = [](const void* src, uint32_t vertices) {
+        std::vector<uint8_t> layer;
+        if (src && vertices > 0)
+            layer.assign(static_cast<const uint8_t*>(src),
+                         static_cast<const uint8_t*>(src) + size_t(vertices) * MCRT_VERTEX_STRIDE);
+        return layer;
     };
-    append(solid, op.solidVertices);
-    append(cutout, op.cutoutVertices);
-    append(translucent, op.translucentVertices);
+    std::vector<uint8_t> layers[3] = {copyLayer(solid, solidVertices), copyLayer(cutout, cutoutVertices),
+                                      copyLayer(translucent, translucentVertices)};
 
     uint8_t emission[4096] = {};
     if (lights && lightCount > 0) {
@@ -170,7 +145,23 @@ void SectionManager::enqueueUpdate(int32_t x, int32_t y, int32_t z, const void* 
                                  z * 16 + int32_t((local >> 4) & 15), packLightColor(level, packed >> 16)});
         }
     }
-    annotateQuads(op.data, op.lights.empty() ? nullptr : emission, blockMaterials);
+    std::vector<uint32_t> tints;
+    if (occupancy) {
+        tints.assign(4096, 0);
+        for (auto& layer : layers)
+            terrain::removeReplacedQuads(layer, occupancy, tints.data());
+    }
+    for (auto& layer : layers)
+        annotateQuads(layer, op.lights.empty() ? nullptr : emission, blockMaterials);
+    if (occupancy)
+        terrain::appendSmoothTerrain(layers[0], occupancy, blockMaterials, tints.data());
+
+    op.solidVertices = static_cast<uint32_t>(layers[0].size() / MCRT_VERTEX_STRIDE);
+    op.cutoutVertices = static_cast<uint32_t>(layers[1].size() / MCRT_VERTEX_STRIDE);
+    op.translucentVertices = static_cast<uint32_t>(layers[2].size() / MCRT_VERTEX_STRIDE);
+    op.data.reserve(layers[0].size() + layers[1].size() + layers[2].size());
+    for (auto& layer : layers)
+        op.data.insert(op.data.end(), layer.begin(), layer.end());
 
     std::lock_guard lock(incomingMutex_);
     incoming_.push_back(std::move(op));

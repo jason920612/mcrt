@@ -75,12 +75,16 @@ MCRT_API int32_t mcrt_render_frame(McrtContext* ctx, const McrtFrameInput* input
 // Each light packs: bits 0-11 local block index ((y << 8) | (z << 4) | x), bits 12-15 emission,
 // bits 16-31 RGB565 color. block_materials is null or 4096 entries (same indexing), each packing
 // material ids for the top (bits 0-7), side (8-15) and bottom (16-23) faces; 0 = Minecraft texture.
+// occupancy is null or 20^3 bytes covering the section plus a two-block border, index
+// (y+2)*400 + (z+2)*20 + (x+2): 0 open, 1 smooth natural block, 2 other solid, 3 thin snow cover,
+// 4 see-through full block (pins nearby terrain corners).
+// Smooth blocks are re-meshed as smoothed terrain; their own quads (and cover quads) are dropped.
 MCRT_API void mcrt_section_update(McrtContext* ctx, int32_t section_x, int32_t section_y, int32_t section_z,
                                   const void* solid, uint32_t solid_vertices,
                                   const void* cutout, uint32_t cutout_vertices,
                                   const void* translucent, uint32_t translucent_vertices,
                                   const uint32_t* lights, uint32_t light_count,
-                                  const uint32_t* block_materials);
+                                  const uint32_t* block_materials, const uint8_t* occupancy);
 
 // Thread-safe. Uploads material `index` (0-based; shaders see id index + 1) of `count`, as two
 // RGBA8 size x size images: albedo (rgb, a = height) and data (normal xy, roughness, ao).

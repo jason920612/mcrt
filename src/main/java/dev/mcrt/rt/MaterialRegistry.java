@@ -33,7 +33,9 @@ public final class MaterialRegistry {
 
 	private final List<Material> materials = new ArrayList<>();
 	private final Map<Block, Integer> blockFaces = new IdentityHashMap<>();
+	private final java.util.Set<Block> smoothBlocks = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
 	private int textureSize;
+	private int snowMaterial;
 
 	static MaterialRegistry load() {
 		MaterialRegistry registry = new MaterialRegistry();
@@ -51,6 +53,7 @@ public final class MaterialRegistry {
 				registry.materials.add(material);
 				ids.put(material.name(), registry.materials.size());
 			}
+			registry.snowMaterial = ids.getOrDefault("snow", 0);
 			for (Map.Entry<String, JsonElement> entry : root.getAsJsonObject("blocks").entrySet()) {
 				Block block = BuiltInRegistries.BLOCK.getValue(Identifier.parse(entry.getKey()));
 				JsonObject faces = entry.getValue().getAsJsonObject();
@@ -59,6 +62,9 @@ public final class MaterialRegistry {
 				int side = faces.has("side") ? id(ids, faces, "side") : all;
 				int bottom = faces.has("bottom") ? id(ids, faces, "bottom") : all;
 				registry.blockFaces.put(block, top | (side << 8) | (bottom << 16));
+				if (faces.has("smooth") && faces.get("smooth").getAsBoolean()) {
+					registry.smoothBlocks.add(block);
+				}
 			}
 		} catch (IOException | RuntimeException e) {
 			McrtClient.LOGGER.error("MCRT: failed to read material table", e);
@@ -70,6 +76,16 @@ public final class MaterialRegistry {
 
 	private static int id(Map<String, Integer> ids, JsonObject faces, String key) {
 		return faces.has(key) ? ids.get(faces.get(key).getAsString()) : 0;
+	}
+
+	/** Natural blocks rendered as smoothed terrain. */
+	boolean isSmooth(Block block) {
+		return smoothBlocks.contains(block);
+	}
+
+	/** Material id for snow-covered tops (thin snow layers fold into the surface below), or 0. */
+	int snowMaterial() {
+		return snowMaterial;
 	}
 
 	/** Packed face materials for a block, or 0 when it keeps Minecraft's texture. */

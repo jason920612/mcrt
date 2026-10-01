@@ -8,20 +8,33 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.SectionPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.SnowLayerBlock;
 import net.minecraft.world.level.block.state.BlockState;
 
 /**
- * Per-block data for a section being compiled: light emitters and PBR material assignments.
- * Local block index = (y << 8) | (z << 4) | x.
+ * Per-block data for a section being compiled: light emitters, PBR material assignments and the
+ * terrain classification the native side smooths. Local block index = (y << 8) | (z << 4) | x.
  */
 final class SectionScanner {
+	static final byte OPEN = 0;    // air, plants, fluids, partial blocks: smooth terrain faces these
+	static final byte SMOOTH = 1;  // natural block rendered as smoothed terrain
+	static final byte SOLID = 2;   // other opaque full block: counts as inside, pins nearby corners
+	static final byte COVER = 3;   // thin snow on smooth terrain: dropped, the surface below turns to snow
+	static final byte PIN = 4;     // see-through full block (ice, glass, leaves): faced like open, pins corners
+	// Snow layers up to this many fold into the surface below; deeper snow becomes a smooth snow block.
+	private static final int MAX_COVER_LAYERS = 3;
+	static final int PAD = 2;      // occupancy covers the section plus PAD blocks on every side
+	static final int BORDER = 16 + 2 * PAD;
+
 	private static final Map<Block, Integer> LIGHT_COLORS = new ConcurrentHashMap<>();
 
 	/**
 	 * @param emitters  each: bits 0-11 local index, 12-15 emission level, 16-31 RGB565 color
 	 * @param materials 4096 packed face materials (see MaterialRegistry), or null if none in the section
+	 * @param occupancy 20^3 classification ((y+2)*400 + (z+2)*20 + (x+2)), or null without smooth blocks
 	 */
-	record Result(int[] emitters, int[] materials) {
+	record Result(int[] emitters, int[] materials, byte[] occupancy) {
 	}
 
 	private SectionScanner() {
@@ -31,6 +44,7 @@ final class SectionScanner {
 		int[] emitters = null;
 		int emitterCount = 0;
 		int[] materials = null;
+		boolean anySmooth = false;
 		BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
 		int baseX = section.minBlockX(), baseY = section.minBlockY(), baseZ = section.minBlockZ();
 		for (int y = 0; y < 16; y++) {
@@ -44,6 +58,7 @@ final class SectionScanner {
 							materials = new int[4096];
 						}
 						materials[local] = faces;
+						anySmooth |= registry.isSmooth(state.getBlock()) || isDeepSnow(state);
 					}
 					int emission = state.getLightEmission();
 					if (emission > 0) {
@@ -58,7 +73,57 @@ final class SectionScanner {
 				}
 			}
 		}
-		return new Result(emitters == null ? new int[0] : Arrays.copyOf(emitters, emitterCount), materials);
+
+		byte[] occupancy = null;
+		if (anySmooth) {
+			occupancy = new byte[BORDER * BORDER * BORDER];
+			for (int y = -PAD; y < 16 + PAD; y++) {
+				for (int z = -PAD; z < 16 + PAD; z++) {
+					for (int x = -PAD; x < 16 + PAD; x++) {
+						occupancy[(y + PAD) * BORDER * BORDER + (z + PAD) * BORDER + (x + PAD)] =
+							classify(region, pos, baseX + x, baseY + y, baseZ + z, registry);
+					}
+				}
+			}
+			// Smooth blocks under a thin snow cover show snow on top.
+			int snow = registry.snowMaterial();
+			if (snow != 0) {
+				for (int y = 0; y < 16; y++) {
+					for (int z = 0; z < 16; z++) {
+						for (int x = 0; x < 16; x++) {
+							int here = (y + PAD) * BORDER * BORDER + (z + PAD) * BORDER + (x + PAD);
+							if (occupancy[here] == SMOOTH && occupancy[here + BORDER * BORDER] == COVER) {
+								int local = (y << 8) | (z << 4) | x;
+								materials[local] = (materials[local] & ~0xFF) | snow;
+							}
+						}
+					}
+				}
+			}
+		}
+		return new Result(emitters == null ? new int[0] : Arrays.copyOf(emitters, emitterCount), materials, occupancy);
+	}
+
+	private static byte classify(RenderSectionRegion region, BlockPos.MutableBlockPos pos, int x, int y, int z,
+			MaterialRegistry registry) {
+		BlockState state = region.getBlockState(pos.set(x, y, z));
+		if (registry.isSmooth(state.getBlock()) || isDeepSnow(state)) {
+			return SMOOTH;
+		}
+		if (state.getBlock() == Blocks.SNOW) {
+			BlockState below = region.getBlockState(pos.set(x, y - 1, z));
+			if (registry.isSmooth(below.getBlock()) || isDeepSnow(below)) {
+				return COVER;
+			}
+		}
+		if (state.isSolidRender()) {
+			return SOLID;
+		}
+		return state.isCollisionShapeFullBlock(region, pos.set(x, y, z)) ? PIN : OPEN;
+	}
+
+	private static boolean isDeepSnow(BlockState state) {
+		return state.getBlock() == Blocks.SNOW && state.getValue(SnowLayerBlock.LAYERS) > MAX_COVER_LAYERS;
 	}
 
 	/** Light color by block id; Minecraft has no light color, so this is a hand-made palette. */

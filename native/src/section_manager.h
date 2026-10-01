@@ -50,7 +50,8 @@ public:
     // Thread-safe producers.
     void enqueueUpdate(int32_t x, int32_t y, int32_t z, const void* solid, uint32_t solidVertices, const void* cutout,
                        uint32_t cutoutVertices, const void* translucent, uint32_t translucentVertices,
-                       const uint32_t* lights, uint32_t lightCount, const uint32_t* blockMaterials);
+                       const uint32_t* lights, uint32_t lightCount, const uint32_t* blockMaterials,
+                       const uint8_t* occupancy);
     void enqueueRemove(int32_t x, int32_t y, int32_t z);
     void enqueueClear();
 

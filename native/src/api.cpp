@@ -49,11 +49,12 @@ MCRT_API int32_t mcrt_render_frame(McrtContext* ctx, const McrtFrameInput* input
 MCRT_API void mcrt_section_update(McrtContext* ctx, int32_t section_x, int32_t section_y, int32_t section_z,
                                   const void* solid, uint32_t solid_vertices, const void* cutout,
                                   uint32_t cutout_vertices, const void* translucent, uint32_t translucent_vertices,
-                                  const uint32_t* lights, uint32_t light_count, const uint32_t* block_materials) {
+                                  const uint32_t* lights, uint32_t light_count, const uint32_t* block_materials,
+                                  const uint8_t* occupancy) {
     try {
         ctx->renderer->sections().enqueueUpdate(section_x, section_y, section_z, solid, solid_vertices, cutout,
                                                 cutout_vertices, translucent, translucent_vertices, lights,
-                                                light_count, block_materials);
+                                                light_count, block_materials, occupancy);
     } catch (const std::exception& e) {
         setError("mcrt_section_update", e);
     }

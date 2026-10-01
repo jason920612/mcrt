@@ -72,7 +72,7 @@ final class NativeBridge {
 			FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS, ADDRESS));
 		this.sectionUpdate = linker.downcallHandle(lib.findOrThrow("mcrt_section_update"),
 			FunctionDescriptor.ofVoid(ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT,
-				ADDRESS, JAVA_INT, ADDRESS, JAVA_INT, ADDRESS, JAVA_INT, ADDRESS, JAVA_INT, ADDRESS));
+				ADDRESS, JAVA_INT, ADDRESS, JAVA_INT, ADDRESS, JAVA_INT, ADDRESS, JAVA_INT, ADDRESS, ADDRESS));
 		this.sectionRemove = linker.downcallHandle(lib.findOrThrow("mcrt_section_remove"),
 			FunctionDescriptor.ofVoid(ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT));
 		this.sectionsClear = linker.downcallHandle(lib.findOrThrow("mcrt_sections_clear"),
@@ -121,10 +121,10 @@ final class NativeBridge {
 	void sectionUpdate(MemorySegment ctx, int x, int y, int z,
 			MemorySegment solid, int solidVertices, MemorySegment cutout, int cutoutVertices,
 			MemorySegment translucent, int translucentVertices, MemorySegment lights, int lightCount,
-			MemorySegment blockMaterials) {
+			MemorySegment blockMaterials, MemorySegment occupancy) {
 		try {
 			sectionUpdate.invokeExact(ctx, x, y, z, solid, solidVertices, cutout, cutoutVertices, translucent, translucentVertices,
-				lights, lightCount, blockMaterials);
+				lights, lightCount, blockMaterials, occupancy);
 		} catch (Throwable t) {
 			throw new RuntimeException(t);
 		}

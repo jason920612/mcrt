@@ -98,11 +98,13 @@ public final class RtRenderer {
 			MemorySegment lights = emitters.length == 0 ? MemorySegment.NULL : arena.allocateFrom(JAVA_INT, emitters);
 			MemorySegment blockMaterials = scan == null || scan.materials() == null
 				? MemorySegment.NULL : arena.allocateFrom(JAVA_INT, scan.materials());
+			MemorySegment occupancy = scan == null || scan.occupancy() == null
+				? MemorySegment.NULL : arena.allocateFrom(java.lang.foreign.ValueLayout.JAVA_BYTE, scan.occupancy());
 			bridge.sectionUpdate(ctx, x, y, z,
 				vertices(solid), vertexCount(solid),
 				vertices(cutout), vertexCount(cutout),
 				vertices(translucent), vertexCount(translucent),
-				lights, emitters.length, blockMaterials);
+				lights, emitters.length, blockMaterials, occupancy);
 		}
 	}
 

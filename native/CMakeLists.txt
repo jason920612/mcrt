@@ -55,6 +55,7 @@ add_library(mcrt_native SHARED
     src/material_store.cpp
     src/renderer.cpp
     src/section_manager.cpp
+    src/terrain_mesher.cpp
     src/vk_context.cpp
     src/vma_impl.cpp)
 add_dependencies(mcrt_native mcrt_shaders)

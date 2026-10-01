@@ -1,5 +1,5 @@
 {
-	"_comment": "Material sources (all CC0 from ambientCG) and which Minecraft block faces use them. scale = blocks covered by one texture repeat. tinted = multiplied by the biome tint (normalized to plains grass).",
+	"_comment": "smooth = rendered as smoothed natural terrain (visual only). Material sources (all CC0 from ambientCG) and which Minecraft block faces use them. scale = blocks covered by one texture repeat. tinted = multiplied by the biome tint (normalized to plains grass).",
 	"materials": {
 		"rock":         { "source": "ambientcg:Rock032",         "scale": 2 },
 		"deepslate":    { "source": "ambientcg:Rock031",         "scale": 2 },
@@ -15,21 +15,21 @@
 		"snow":         { "source": "ambientcg:Snow010A",        "scale": 2 }
 	},
 	"blocks": {
-		"minecraft:stone":         { "all": "rock" },
-		"minecraft:deepslate":     { "all": "deepslate" },
-		"minecraft:grass_block":   { "top": "grass", "side": "dirt", "bottom": "dirt" },
-		"minecraft:dirt":          { "all": "dirt" },
-		"minecraft:coarse_dirt":   { "all": "dirt" },
-		"minecraft:rooted_dirt":   { "all": "dirt" },
-		"minecraft:sand":          { "all": "sand" },
-		"minecraft:gravel":        { "all": "gravel" },
+		"minecraft:stone":         { "all": "rock", "smooth": true },
+		"minecraft:deepslate":     { "all": "deepslate", "smooth": true },
+		"minecraft:grass_block":   { "top": "grass", "side": "dirt", "bottom": "dirt", "smooth": true },
+		"minecraft:dirt":          { "all": "dirt", "smooth": true },
+		"minecraft:coarse_dirt":   { "all": "dirt", "smooth": true },
+		"minecraft:rooted_dirt":   { "all": "dirt", "smooth": true },
+		"minecraft:sand":          { "all": "sand", "smooth": true },
+		"minecraft:gravel":        { "all": "gravel", "smooth": true },
 		"minecraft:cobblestone":   { "all": "cobblestone" },
 		"minecraft:oak_planks":    { "all": "oak_planks" },
 		"minecraft:oak_log":       { "side": "oak_bark" },
 		"minecraft:oak_wood":      { "all": "oak_bark" },
 		"minecraft:stone_bricks":  { "all": "stone_bricks" },
 		"minecraft:bricks":        { "all": "bricks" },
-		"minecraft:snow_block":    { "all": "snow" },
+		"minecraft:snow_block":    { "all": "snow", "smooth": true },
 		"minecraft:snow":          { "all": "snow" },
 		"minecraft:powder_snow":   { "all": "snow" }
 	}

@@ -24,7 +24,9 @@ struct BlockVertex
     float3 position;         // relative to the section origin
     uint color;              // RGBA8: biome tint * baked shade/AO
     float2 uv;               // block atlas
-    uint light;              // rewritten natively: bits 12-15 emission level, 16-23 material id
+    uint light;              // rewritten natively: bits 12-15 emission level, 16-23 material id;
+                             // smoothed terrain (bit 0 set): 16-23 top material, 24-31 side material,
+                             // and uv holds the octahedral-encoded smooth normal
 };
 
 struct SectionInfo
@@ -104,6 +106,113 @@ struct SurfaceSample
 
 // Plains grass color: tinted materials are authored for it and shift with the biome tint.
 static const float3 REFERENCE_TINT = float3(0.569, 0.741, 0.349);
+
+float3 octDecode(float2 e)
+{
+    float3 n = float3(e, 1.0 - abs(e.x) - abs(e.y));
+    if (n.z < 0.0)
+        n.xy = (1.0 - abs(n.yx)) * float2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+    return normalize(n);
+}
+
+struct MaterialSample
+{
+    float3 albedo;
+    float3 normal;
+    float roughness;
+};
+
+// Triplanar sampling for smoothed (non axis-aligned) terrain, with UDN normal blending.
+// UV orientations keep images upright on walls (v down the image = down in the world).
+MaterialSample sampleTriplanar(uint materialId, float3 pos, float3 n, float distance)
+{
+    MaterialParams params = materialParams[materialId - 1];
+    int3 cell = frame.cameraBlock.xyz + int3(floor(pos));
+    int period = int(params.scale);
+    int3 wrapped = ((cell % period) + period) % period;
+    float3 coord = (float3(wrapped) + (pos - floor(pos))) / params.scale;
+    float lod = log2(max(distance * frame.params.y * params.textureSize / params.scale, 1.0));
+    float layer = float(materialId - 1);
+
+    float3 weights = pow(abs(n), 4.0);
+    weights /= weights.x + weights.y + weights.z;
+
+    MaterialSample result;
+    result.albedo = 0.0;
+    result.roughness = 0.0;
+    float3 blended = 0.0;
+    if (weights.x > 0.01)
+    {
+        float3 uv = float3(coord.z, -coord.y, layer);
+        float4 data = materialData.SampleLevel(materialSampler, uv, lod);
+        result.albedo += materialAlbedo.SampleLevel(materialSampler, uv, lod).rgb * weights.x;
+        result.roughness += data.z * weights.x;
+        float3 t = float3(data.xy * 2.0 - 1.0 + n.zy, n.x);
+        blended += t.zyx * weights.x;
+    }
+    if (weights.y > 0.01)
+    {
+        float3 uv = float3(coord.x, -coord.z, layer);
+        float4 data = materialData.SampleLevel(materialSampler, uv, lod);
+        result.albedo += materialAlbedo.SampleLevel(materialSampler, uv, lod).rgb * weights.y;
+        result.roughness += data.z * weights.y;
+        float3 t = float3(data.xy * 2.0 - 1.0 + n.xz, n.y);
+        blended += t.xzy * weights.y;
+    }
+    if (weights.z > 0.01)
+    {
+        float3 uv = float3(coord.x, -coord.y, layer);
+        float4 data = materialData.SampleLevel(materialSampler, uv, lod);
+        result.albedo += materialAlbedo.SampleLevel(materialSampler, uv, lod).rgb * weights.z;
+        result.roughness += data.z * weights.z;
+        float3 t = float3(data.xy * 2.0 - 1.0 + n.xy, n.z);
+        blended += t.xyz * weights.z;
+    }
+    float total = (weights.x > 0.01 ? weights.x : 0.0) + (weights.y > 0.01 ? weights.y : 0.0) + (weights.z > 0.01 ? weights.z : 0.0);
+    result.albedo /= total;
+    result.roughness /= total;
+    result.normal = normalize(blended);
+    return result;
+}
+
+// Smoothed terrain: top material on gentle slopes, side material on steep ones, blended between.
+void applySmoothMaterial(inout SurfaceSample s, uint word, float3 smoothNormal, float3 tint)
+{
+    uint topId = (word >> 16) & 0xFF;
+    uint sideId = (word >> 24) & 0xFF;
+    float3 pos = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
+    float distance = length(pos - frame.cameraOffset.xyz);
+    float3 inside = pos - s.geometricNormal * 0.001;
+    float topWeight = smoothstep(0.55, 0.8, smoothNormal.y);
+
+    MaterialSample m;
+    if (topId == sideId || topWeight >= 1.0 || sideId == 0)
+        m = sampleTriplanar(topId, inside, smoothNormal, distance);
+    else if (topWeight <= 0.0 || topId == 0)
+        m = sampleTriplanar(sideId, inside, smoothNormal, distance);
+    else
+    {
+        MaterialSample top = sampleTriplanar(topId, inside, smoothNormal, distance);
+        MaterialSample side = sampleTriplanar(sideId, inside, smoothNormal, distance);
+        // Height-free blend; a height-based blend comes with displacement.
+        m.albedo = lerp(side.albedo, top.albedo, topWeight);
+        m.roughness = lerp(side.roughness, top.roughness, topWeight);
+        m.normal = normalize(lerp(side.normal, top.normal, topWeight));
+        // Only the top (grass) is tinted; apply before mixing below via the weight.
+        if ((materialParams[topId - 1].flags & MATERIAL_TINTED) != 0)
+            m.albedo = lerp(side.albedo, top.albedo * clamp(pow(tint, 2.2) / pow(REFERENCE_TINT, 2.2), 0.0, 2.0), topWeight);
+        s.albedo = m.albedo;
+        s.normal = m.normal;
+        s.roughness = clamp(m.roughness, 0.08, 1.0);
+        return;
+    }
+    uint used = topWeight >= 0.5 ? topId : sideId;
+    if (used != 0 && (materialParams[used - 1].flags & MATERIAL_TINTED) != 0)
+        m.albedo *= clamp(pow(tint, 2.2) / pow(REFERENCE_TINT, 2.2), 0.0, 2.0);
+    s.albedo = m.albedo;
+    s.normal = m.normal;
+    s.roughness = clamp(m.roughness, 0.08, 1.0);
+}
 
 // Blocks with a PBR material: world-space UVs so one texture spans `scale` blocks seamlessly,
 // projected along the face's dominant axis, with mip level from the pixel footprint.
@@ -201,6 +310,18 @@ SurfaceSample fetchSurface(BuiltInTriangleIntersectionAttributes attribs, uint f
     s.geometricNormal = n;
     s.roughness = 0.9;
     s.emission = float((v0.light >> 12) & 0xF) / 15.0;
+    if ((v0.light & 1) != 0)
+    {
+        float3 smoothNormal = normalize(octDecode(v0.uv) * bary.x + octDecode(v1.uv) * bary.y + octDecode(v2.uv) * bary.z);
+        if (dot(smoothNormal, n) < 0.0)
+            smoothNormal = -smoothNormal;
+        s.albedo = 1.0;
+        s.alpha = 1.0;
+        applySmoothMaterial(s, v0.light, smoothNormal, tint.rgb);
+        if (dot(s.normal, n) < 0.05)
+            s.normal = normalize(s.normal + n * (0.05 - dot(s.normal, n)));
+        return s;
+    }
     uint materialId = (v0.light >> 16) & 0xFF;
     if (materialId != 0)
         applyMaterial(s, materialId, tint.rgb);

@@ -102,6 +102,8 @@ def main() -> int:
     names = {m["name"] for m in materials}
     for block, faces in config["blocks"].items():
         for face, material in faces.items():
+            if face == "smooth":
+                continue
             if material not in names:
                 raise RuntimeError(f"{block}.{face} refers to unknown material {material}")
 
