@@ -52,6 +52,20 @@ float3 acesTonemap(float3 x)
     return saturate((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14));
 }
 
+// A painter's grade on top of the filmic curve: ACES greys out saturated color, so some of it is
+// given back; highlights lean warm and shadows cool (sunlight versus skylight), and a gentle
+// S-curve adds depth.
+float3 grade(float3 c)
+{
+    float l = dot(c, float3(0.2126, 0.7152, 0.0722));
+    c = max(lerp(float3(l, l, l), c, 1.18), 0.0);
+    float3 shadows = float3(0.94, 0.98, 1.06), highlights = float3(1.05, 1.0, 0.93);
+    c *= lerp(shadows, highlights, smoothstep(0.1, 0.7, l));
+    c = saturate(c);
+    float3 s = c * c * (3.0 - 2.0 * c);
+    return lerp(c, s, 0.25);
+}
+
 // History sampled with a Catmull-Rom filter (5 bilinear taps): bilinear history resampling
 // blurs the image a little every frame, which accumulates into a soft, low-resolution look.
 float3 sampleHistoryCatmullRom(Texture2D<float4> tex, float2 uv, float2 size)
@@ -143,7 +157,7 @@ void temporalUpscale(uint3 id : SV_DispatchThreadID)
     historyWrite[cur][id.xy] = float4(result, 1.0);
 
     float3 hdr = uncompress(result);
-    float3 mapped = frame.params.z != 0.0 ? saturate(hdr) : acesTonemap(hdr);
+    float3 mapped = frame.params.z != 0.0 ? saturate(hdr) : grade(acesTonemap(hdr));
     outputImage[id.xy] = float4(pow(mapped, 1.0 / 2.2), 1.0);
     depthOut[id.y * taa.outputSize.x + id.x] = depthIn[nearest.y * inSize.x + nearest.x];
 }

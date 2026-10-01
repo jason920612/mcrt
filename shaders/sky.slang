@@ -36,7 +36,8 @@ void skyViewLut(uint3 id : SV_DispatchThreadID)
     skyView[id.xy] = float4(radiance, 1.0);
 }
 
-// Cloud LUT (512x256, upper hemisphere): clouds as seen from the camera, after skyViewLut.
+// Cloud LUT (1024x512, upper hemisphere): clouds as seen from the camera, after skyViewLut.
+// Half the texels (alternating checkerboard) are refreshed per frame: clouds drift slowly.
 [shader("compute")]
 [numthreads(8, 8, 1)]
 void cloudViewLut(uint3 id : SV_DispatchThreadID)
@@ -45,7 +46,10 @@ void cloudViewLut(uint3 id : SV_DispatchThreadID)
     cloudView.GetDimensions(size.x, size.y);
     if (any(id.xy >= size))
         return;
+    if (((id.x + id.y + frame.frameInfo.x) & 1) != 0 && frame.frameInfo.x > 2)
+        return;
     float3 dir = cloudViewDirection((float2(id.xy) + 0.5) / float2(size));
     float3 ambient = skyViewSampled.SampleLevel(skySampler, skyViewUv(float3(0.0, 1.0, 0.0)), 0).rgb * 1.4;
-    cloudView[id.xy] = marchClouds(frame.cameraOffset.xyz, dir, ambient);
+    float jitter = hash13(float3(id.xy, float(frame.frameInfo.x & 15) + 7.0)); // TAA averages it
+    cloudView[id.xy] = marchClouds(frame.cameraOffset.xyz, dir, ambient, jitter);
 }

@@ -233,6 +233,9 @@ void applyMacroDetail(inout SurfaceSample s, float3 world)
 void shadeFarLand(inout SurfaceSample s, float3 world, bool forest)
 {
     float3 n = s.normal;
+    // Rock shows where the terrain itself is steep (decided before the relief noise, which would
+    // otherwise speckle gentle snowfields with rock).
+    float steep = smoothstep(0.8, 0.6, n.y + (macroNoise(world * 0.03) - 0.5) * 0.1);
     // Relief: ridges a few tens of blocks wide and gullies, bending the shading normal.
     const float e = 1.5;
     float3 p = world * float3(1.0 / 23.0, 1.0 / 23.0, 1.0 / 23.0);
@@ -241,11 +244,10 @@ void shadeFarLand(inout SurfaceSample s, float3 world, bool forest)
              + 0.25 * macroNoise((p + float3(e / 23.0, 0, 0)) * 7.1 + 23.0);
     float hz = macroNoise(p + float3(0, 0, e / 23.0)) + 0.5 * macroNoise((p + float3(0, 0, e / 23.0)) * 2.7 + 11.0)
              + 0.25 * macroNoise((p + float3(0, 0, e / 23.0)) * 7.1 + 23.0);
-    float3 grad = float3(hx - h0, 0.0, hz - h0) / e * 9.0;
+    float3 grad = float3(hx - h0, 0.0, hz - h0) / e * 5.0;
     n = normalize(n - (grad - n * dot(grad, n)));
 
     float3 albedo = s.albedo;
-    float steep = smoothstep(0.82, 0.62, n.y + (macroNoise(world * 0.07) - 0.5) * 0.15);
     float3 rock = float3(0.13, 0.12, 0.11) * (0.75 + 0.5 * macroNoise(world * float3(0.02, 0.35, 0.02)));
     if (forest && steep < 0.5)
     {

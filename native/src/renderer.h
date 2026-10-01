@@ -76,7 +76,7 @@ private:
 
     // Sky-view and cloud LUTs (sky.slang), rebuilt every frame before tracing.
     static constexpr uint32_t kSkyWidth = 192, kSkyHeight = 108;
-    static constexpr uint32_t kCloudWidth = 512, kCloudHeight = 256;
+    static constexpr uint32_t kCloudWidth = 1024, kCloudHeight = 512;
     Image skyView_;
     Image cloudView_;
     VkPipeline cloudPipeline_ = VK_NULL_HANDLE;
