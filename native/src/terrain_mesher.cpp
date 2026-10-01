@@ -2,6 +2,7 @@
 
 #include "mcrt/api.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 
@@ -11,6 +12,7 @@ namespace {
 
 constexpr size_t kQuadBytes = size_t(MCRT_VERTEX_STRIDE) * 4;
 constexpr uint32_t kSmoothFlag = 1; // vertex light word bit 0: smoothed terrain vertex
+constexpr uint32_t kAtlasFlag = 2;  // bit 1: textured from the atlas sprite packed into color/word
 
 struct Vec3 {
     float x, y, z;
@@ -155,7 +157,8 @@ int quadBlock(const uint8_t* quad, float normal[3]) {
     return (b[1] << 8) | (b[2] << 4) | b[0];
 }
 
-void removeReplacedQuads(std::vector<uint8_t>& layer, const uint8_t* occupancy, uint32_t* tints) {
+void removeReplacedQuads(std::vector<uint8_t>& layer, const uint8_t* occupancy, uint32_t* tints,
+                         SpriteRect* sprites) {
     const size_t quads = layer.size() / kQuadBytes;
     size_t kept = 0;
     for (size_t q = 0; q < quads; ++q) {
@@ -171,6 +174,19 @@ void removeReplacedQuads(std::vector<uint8_t>& layer, const uint8_t* occupancy, 
                 std::memcpy(&color, quad + 12, 4);
                 if (normal[1] > 0.7f || tints[local] == 0)
                     tints[local] = color;
+                SpriteRect& sprite = sprites[local];
+                if (sprite.u1 <= sprite.u0) {
+                    float uv[2];
+                    std::memcpy(uv, quad + 16, sizeof(uv));
+                    sprite = {uv[0], uv[1], uv[0], uv[1]};
+                    for (int v = 1; v < 4; ++v) {
+                        std::memcpy(uv, quad + v * MCRT_VERTEX_STRIDE + 16, sizeof(uv));
+                        sprite.u0 = std::min(sprite.u0, uv[0]);
+                        sprite.v0 = std::min(sprite.v0, uv[1]);
+                        sprite.u1 = std::max(sprite.u1, uv[0]);
+                        sprite.v1 = std::max(sprite.v1, uv[1]);
+                    }
+                }
             }
             continue;
         }
@@ -182,7 +198,7 @@ void removeReplacedQuads(std::vector<uint8_t>& layer, const uint8_t* occupancy, 
 }
 
 void appendSmoothTerrain(std::vector<uint8_t>& layer, const uint8_t* occupancy, const uint32_t* blockMaterials,
-                         const uint32_t* tints) {
+                         const uint32_t* tints, const SpriteRect* sprites) {
     CornerField field(occupancy);
     // Per face direction: neighbor offset and the 4 face corners (offsets from the block's min
     // corner) in perimeter order.
@@ -207,8 +223,15 @@ void appendSmoothTerrain(std::vector<uint8_t>& layer, const uint8_t* occupancy, 
                 const int local = (y << 8) | (z << 4) | x;
                 const uint32_t materials = blockMaterials ? blockMaterials[local] : 0;
                 // Shader picks top vs side material from the smoothed normal.
-                const uint32_t word = kSmoothFlag | ((materials & 0xFF) << 16) | (((materials >> 8) & 0xFF) << 24);
-                const uint32_t color = tints[local] ? tints[local] : 0xFFFFFFFFu;
+                uint32_t word = kSmoothFlag | ((materials & 0xFF) << 16) | (((materials >> 8) & 0xFF) << 24);
+                uint32_t color = tints[local] ? tints[local] : 0xFFFFFFFFu;
+                if ((materials & 0xFF) == kAtlasMaterial) {
+                    // Atlas sprite: origin in color (2 x 16-bit normalized), width in the word's high half.
+                    const SpriteRect& sprite = sprites[local];
+                    auto unorm16 = [](float v) { return uint32_t(std::clamp(v, 0.0f, 1.0f) * 65535.0f + 0.5f); };
+                    color = unorm16(sprite.u0) | (unorm16(sprite.v0) << 16);
+                    word = kSmoothFlag | kAtlasFlag | (unorm16(sprite.u1 - sprite.u0) << 16);
+                }
                 for (const Face& face : faces) {
                     uint8_t neighbor = occupancyAt(occupancy, x + face.dx, y + face.dy, z + face.dz);
                     if (neighbor != kOpen && neighbor != kCover && neighbor != kPin)
@@ -222,6 +245,39 @@ void appendSmoothTerrain(std::vector<uint8_t>& layer, const uint8_t* occupancy, 
                     }
                 }
             }
+}
+
+void extendWaterUnderShore(std::vector<uint8_t>& translucentLayer, const uint8_t* occupancy) {
+    constexpr uint32_t kWaterMaterial = 255;
+    constexpr float kReach = 0.5f;
+    const size_t quads = translucentLayer.size() / kQuadBytes;
+    for (size_t q = 0; q < quads; ++q) {
+        uint8_t* quad = translucentLayer.data() + q * kQuadBytes;
+        uint32_t word;
+        std::memcpy(&word, quad + 24, 4);
+        if (((word >> 16) & 0xFF) != kWaterMaterial)
+            continue;
+        float normal[3];
+        const int local = quadBlock(quad, normal);
+        if (local < 0 || std::fabs(normal[1]) < 0.9f)
+            continue; // only the (near) horizontal surface
+        const int bx = local & 15, by = local >> 8, bz = (local >> 4) & 15;
+        const bool reach[4] = {occupancyAt(occupancy, bx + 1, by, bz) == kSmooth,  // +x
+                               occupancyAt(occupancy, bx - 1, by, bz) == kSmooth,  // -x
+                               occupancyAt(occupancy, bx, by, bz + 1) == kSmooth,  // +z
+                               occupancyAt(occupancy, bx, by, bz - 1) == kSmooth}; // -z
+        if (!reach[0] && !reach[1] && !reach[2] && !reach[3])
+            continue;
+        for (int v = 0; v < 4; ++v) {
+            float p[3];
+            std::memcpy(p, quad + v * MCRT_VERTEX_STRIDE, 12);
+            if (reach[0] && std::fabs(p[0] - (bx + 1)) < 1e-3f) p[0] += kReach;
+            if (reach[1] && std::fabs(p[0] - bx) < 1e-3f) p[0] -= kReach;
+            if (reach[2] && std::fabs(p[2] - (bz + 1)) < 1e-3f) p[2] += kReach;
+            if (reach[3] && std::fabs(p[2] - bz) < 1e-3f) p[2] -= kReach;
+            std::memcpy(quad + v * MCRT_VERTEX_STRIDE, p, 12);
+        }
+    }
 }
 
 } // namespace mcrt::terrain

@@ -1,5 +1,5 @@
 {
-	"_comment": "smooth = rendered as smoothed natural terrain (visual only). Material sources (all CC0 from ambientCG) and which Minecraft block faces use them. scale = blocks covered by one texture repeat. tinted = multiplied by the biome tint (normalized to plains grass).",
+	"_comment": "smooth = rendered as smoothed natural terrain (visual only); atlas = smoothed but textured with Minecraft's own block texture (ores). Material sources (all CC0 from ambientCG) and which Minecraft block faces use them. scale = blocks covered by one texture repeat. tinted = multiplied by the biome tint (normalized to plains grass).",
 	"materials": {
 		"rock":         { "source": "ambientcg:Rock032",         "scale": 2 },
 		"deepslate":    { "source": "ambientcg:Rock031",         "scale": 2 },
@@ -53,6 +53,22 @@
 		"minecraft:podzol":        { "top": "dirt", "side": "dirt", "bottom": "dirt", "smooth": true },
 		"minecraft:mycelium":      { "top": "dirt", "side": "dirt", "bottom": "dirt", "smooth": true },
 		"minecraft:mud":           { "all": "dirt", "smooth": true },
-		"minecraft:red_sand":      { "all": "sand", "smooth": true }
+		"minecraft:red_sand":      { "all": "sand", "smooth": true },
+		"minecraft:coal_ore": { "smooth": true, "atlas": true },
+		"minecraft:deepslate_coal_ore": { "smooth": true, "atlas": true },
+		"minecraft:iron_ore": { "smooth": true, "atlas": true },
+		"minecraft:deepslate_iron_ore": { "smooth": true, "atlas": true },
+		"minecraft:copper_ore": { "smooth": true, "atlas": true },
+		"minecraft:deepslate_copper_ore": { "smooth": true, "atlas": true },
+		"minecraft:gold_ore": { "smooth": true, "atlas": true },
+		"minecraft:deepslate_gold_ore": { "smooth": true, "atlas": true },
+		"minecraft:redstone_ore": { "smooth": true, "atlas": true },
+		"minecraft:deepslate_redstone_ore": { "smooth": true, "atlas": true },
+		"minecraft:lapis_ore": { "smooth": true, "atlas": true },
+		"minecraft:deepslate_lapis_ore": { "smooth": true, "atlas": true },
+		"minecraft:diamond_ore": { "smooth": true, "atlas": true },
+		"minecraft:deepslate_diamond_ore": { "smooth": true, "atlas": true },
+		"minecraft:emerald_ore": { "smooth": true, "atlas": true },
+		"minecraft:deepslate_emerald_ore": { "smooth": true, "atlas": true }
 	}
 }

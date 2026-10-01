@@ -21,12 +21,26 @@ enum Occupancy : uint8_t { kOpen = 0, kSmooth = 1, kSolid = 2, kCover = 3, kPin 
 // outside the section. Writes the quad's unit outward normal.
 int quadBlock(const uint8_t* quad, float normal[3]);
 
+constexpr uint32_t kAtlasMaterial = 254; // smoothed, but textured with the block's atlas sprite
+
+// Atlas sprite of a block, taken from its own Minecraft quads.
+struct SpriteRect {
+    float u0 = 0, v0 = 0, u1 = 0, v1 = 0;
+};
+
 // Drops quads belonging to smooth or cover blocks from one layer, remembering the biome tint of
-// smooth blocks (their top face's color when present) in tints[4096].
-void removeReplacedQuads(std::vector<uint8_t>& layer, const uint8_t* occupancy, uint32_t* tints);
+// smooth blocks (their top face's color when present) in tints[4096] and their atlas sprite in
+// sprites[4096].
+void removeReplacedQuads(std::vector<uint8_t>& layer, const uint8_t* occupancy, uint32_t* tints,
+                         SpriteRect* sprites);
 
 // Appends the smoothed terrain quads (Minecraft's vertex layout, see pathtrace.slang) to a layer.
 void appendSmoothTerrain(std::vector<uint8_t>& layer, const uint8_t* occupancy, const uint32_t* blockMaterials,
-                         const uint32_t* tints);
+                         const uint32_t* tints, const SpriteRect* sprites);
+
+// Extends water surface quads (material 255 in the light word) half a block under neighbouring
+// smoothed terrain, so the shoreline becomes the curve where the smooth surface meets the water
+// plane instead of the block grid's staircase.
+void extendWaterUnderShore(std::vector<uint8_t>& translucentLayer, const uint8_t* occupancy);
 
 } // namespace mcrt::terrain

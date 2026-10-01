@@ -1,6 +1,8 @@
 #include "section_manager.h"
 
 #include "mcrt/api.h"
+#include "bevel.h"
+#include "shapes.h"
 #include "terrain_mesher.h"
 
 #include <algorithm>
@@ -63,6 +65,9 @@ void annotateQuads(std::vector<uint8_t>& data, const uint8_t* emission, const ui
                 material = (blockMaterials[local] >> shift) & 0xFF;
                 // Only the fluid surface itself is water; plants growing in it keep their texture.
                 if (material == kWaterMaterial && !translucentLayer)
+                    material = 0;
+                // Atlas-textured blocks that were not smoothed (e.g. thin walls) keep their quads as is.
+                if (material == terrain::kAtlasMaterial)
                     material = 0;
             }
             word = (level << 12) | (material << 16);
@@ -152,16 +157,32 @@ void SectionManager::enqueueUpdate(int32_t x, int32_t y, int32_t z, const void* 
                                  z * 16 + int32_t((local >> 4) & 15), packLightColor(level, packed >> 16)});
         }
     }
+    // Leaves and logs lose their cube quads; replacements are appended below.
+    std::vector<shapes::BlockLook> looks;
+    if (blockMaterials) {
+        looks.assign(4096, {});
+        for (auto& layer : layers)
+            shapes::removeShapedQuads(layer, blockMaterials, looks.data());
+    }
     std::vector<uint32_t> tints;
+    std::vector<terrain::SpriteRect> sprites;
     if (occupancy) {
         tints.assign(4096, 0);
+        sprites.assign(4096, {});
         for (auto& layer : layers)
-            terrain::removeReplacedQuads(layer, occupancy, tints.data());
+            terrain::removeReplacedQuads(layer, occupancy, tints.data(), sprites.data());
     }
+    // Remaining full cubes get beveled edges (before annotation, which reads each quad's block).
+    bevel::bevelFullCubes(layers[0]);
+    bevel::bevelFullCubes(layers[1]);
     for (int i = 0; i < 3; ++i)
         annotateQuads(layers[i], op.lights.empty() ? nullptr : emission, blockMaterials, i == 2);
-    if (occupancy)
-        terrain::appendSmoothTerrain(layers[0], occupancy, blockMaterials, tints.data());
+    if (occupancy) {
+        terrain::appendSmoothTerrain(layers[0], occupancy, blockMaterials, tints.data(), sprites.data());
+        terrain::extendWaterUnderShore(layers[2], occupancy);
+    }
+    if (!looks.empty())
+        shapes::appendShapes(layers[0], layers[1], x, y, z, blockMaterials, looks.data());
 
     op.solidVertices = static_cast<uint32_t>(layers[0].size() / MCRT_VERTEX_STRIDE);
     op.cutoutVertices = static_cast<uint32_t>(layers[1].size() / MCRT_VERTEX_STRIDE);

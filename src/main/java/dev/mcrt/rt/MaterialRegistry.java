@@ -27,6 +27,8 @@ import net.minecraft.world.level.block.Block;
 public final class MaterialRegistry {
 	private static final String ROOT = "/assets/mcrt/materials/";
 	static final int FLAG_TINTED = 1;
+	/** Pseudo material id: smoothed geometry textured with the block's own atlas sprite. */
+	static final int ATLAS_MATERIAL = 254;
 
 	record Material(String name, int scale, boolean tinted) {
 	}
@@ -61,6 +63,10 @@ public final class MaterialRegistry {
 				int top = faces.has("top") ? id(ids, faces, "top") : all;
 				int side = faces.has("side") ? id(ids, faces, "side") : all;
 				int bottom = faces.has("bottom") ? id(ids, faces, "bottom") : all;
+				if (faces.has("atlas") && faces.get("atlas").getAsBoolean()) {
+					// Smoothed, but keeps Minecraft's own block texture (ores).
+					top = side = bottom = ATLAS_MATERIAL;
+				}
 				registry.blockFaces.put(block, top | (side << 8) | (bottom << 16));
 				if (faces.has("smooth") && faces.get("smooth").getAsBoolean()) {
 					registry.smoothBlocks.add(block);

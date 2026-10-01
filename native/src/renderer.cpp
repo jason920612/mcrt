@@ -694,6 +694,8 @@ bool Renderer::renderFrame(const McrtFrameInput& input, McrtFrameOutput& output)
     uniforms.params[0] = input.time_seconds;
     uniforms.params[1] = input.pixel_spread;
     uniforms.atmosphere[0] = input.cloud_height;
+    uniforms.atmosphere[2] = float(input.atlas_width);
+    uniforms.atmosphere[3] = float(input.atlas_height);
     uniforms.params[2] = static_cast<float>(input.debug_mode);
     uniforms.params[3] = input.rain;
     uniforms.frameInfo[0] = input.frame_index;

@@ -34,7 +34,8 @@ final class SectionScanner {
 
 	/**
 	 * @param emitters  each: bits 0-11 local index, 12-15 emission level, 16-31 RGB565 color
-	 * @param materials 4096 packed face materials (see MaterialRegistry), or null if none in the section
+	 * @param materials 4096 entries: packed face materials (see MaterialRegistry) in bits 0-23 and the
+	 *                  replacement shape in bits 24-31 (SHAPE_*); null if the section has neither
 	 * @param occupancy 20^3 classification ((y+2)*400 + (z+2)*20 + (x+2)), or null without smooth blocks
 	 */
 	record Result(int[] emitters, int[] materials, byte[] occupancy) {
@@ -60,6 +61,7 @@ final class SectionScanner {
 					if (fluid.isSame(net.minecraft.world.level.material.Fluids.WATER)) {
 						faces = WATER_FACES;
 					}
+					faces |= shapeOf(state) << 24;
 					if (faces != 0) {
 						if (materials == null) {
 							materials = new int[4096];
@@ -83,12 +85,31 @@ final class SectionScanner {
 
 		byte[] occupancy = null;
 		if (anySmooth) {
-			occupancy = new byte[BORDER * BORDER * BORDER];
-			for (int y = -PAD; y < 16 + PAD; y++) {
-				for (int z = -PAD; z < 16 + PAD; z++) {
-					for (int x = -PAD; x < 16 + PAD; x++) {
-						occupancy[(y + PAD) * BORDER * BORDER + (z + PAD) * BORDER + (x + PAD)] =
+			// Classify one block wider than we hand out, so the thin-wall rule below sees the
+			// neighbors of every cell it decides (keeping neighboring sections consistent).
+			final int wide = BORDER + 2;
+			byte[] classes = new byte[wide * wide * wide];
+			for (int y = -PAD - 1; y < 16 + PAD + 1; y++) {
+				for (int z = -PAD - 1; z < 16 + PAD + 1; z++) {
+					for (int x = -PAD - 1; x < 16 + PAD + 1; x++) {
+						classes[(y + PAD + 1) * wide * wide + (z + PAD + 1) * wide + (x + PAD + 1)] =
 							classify(region, pos, baseX + x, baseY + y, baseZ + z, registry);
+					}
+				}
+			}
+			occupancy = new byte[BORDER * BORDER * BORDER];
+			for (int y = 0; y < BORDER; y++) {
+				for (int z = 0; z < BORDER; z++) {
+					for (int x = 0; x < BORDER; x++) {
+						int w = (y + 1) * wide * wide + (z + 1) * wide + (x + 1);
+						byte type = classes[w];
+						// A one-block-thick wall (open on both sides across it, continuing along it and
+						// up or down) is practically never natural and nearly always built: keep it a
+						// cube. Lone bumps in natural terrain fail the continuation tests.
+						if (type == SMOOTH && (isWall(classes, w, 1, wide, wide * wide) || isWall(classes, w, wide, 1, wide * wide))) {
+							type = SOLID;
+						}
+						occupancy[y * BORDER * BORDER + z * BORDER + x] = type;
 					}
 				}
 			}
@@ -143,6 +164,49 @@ final class SectionScanner {
 		}
 		pos.set(x, y, z);
 		return exposed;
+	}
+
+	// Blocks re-shaped natively to hide the cube (see native/src/shapes.cpp).
+	static final int SHAPE_LEAVES = 1;  // replaced by crossed, alpha-cut foliage cards
+	static final int SHAPE_LOG_X = 2;   // logs: replaced by an octagonal trunk along the axis
+	static final int SHAPE_LOG_Y = 3;
+	static final int SHAPE_LOG_Z = 4;
+
+	private static int shapeOf(BlockState state) {
+		Block block = state.getBlock();
+		if (block instanceof net.minecraft.world.level.block.LeavesBlock) {
+			return SHAPE_LEAVES;
+		}
+		if (block instanceof net.minecraft.world.level.block.RotatedPillarBlock) {
+			String id = BuiltInRegistries.BLOCK.getKey(block).getPath();
+			if (id.endsWith("_log") || id.endsWith("_stem")) {
+				return switch (state.getValue(net.minecraft.world.level.block.RotatedPillarBlock.AXIS)) {
+					case X -> SHAPE_LOG_X;
+					case Z -> SHAPE_LOG_Z;
+					default -> SHAPE_LOG_Y;
+				};
+			}
+		}
+		return 0;
+	}
+
+	// across/along/up: index strides of the axis across the wall, along it, and vertical.
+	private static boolean isWall(byte[] classes, int w, int across, int along, int up) {
+		if (!isOpen(classes[w - across]) || !isOpen(classes[w + across])) {
+			return false;
+		}
+		boolean continuesAlong = isFilled(classes[w - along]) || isFilled(classes[w + along]);
+		boolean continuesVertically = (isFilled(classes[w + up]) && isOpen(classes[w + up - across]) && isOpen(classes[w + up + across]))
+			|| (isFilled(classes[w - up]) && isOpen(classes[w - up - across]) && isOpen(classes[w - up + across]));
+		return continuesAlong && continuesVertically;
+	}
+
+	private static boolean isFilled(byte type) {
+		return type == SMOOTH || type == SOLID;
+	}
+
+	private static boolean isOpen(byte type) {
+		return type == OPEN || type == COVER || type == PIN;
 	}
 
 	private static boolean isDeepSnow(BlockState state) {

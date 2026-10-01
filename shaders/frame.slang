@@ -17,7 +17,7 @@ struct FrameUniforms
     int4 cameraBlock;        // camera block position (absolute)
     float4 prevViewProj[4];  // last frame's viewProj (columns)
     float4 prevCameraShift;  // block-relative position + this = position relative to last frame's camera
-    float4 atmosphere;       // x = cloud layer base (absolute y)
+    float4 atmosphere;       // x = cloud layer base (absolute y), zw = block atlas size in texels
 };
 
 static const uint SKY_OVERWORLD = 0;

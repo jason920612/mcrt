@@ -51,10 +51,12 @@ add_custom_target(mcrt_shaders DEPENDS ${SHADER_HEADERS})
 # ---- Native library ---------------------------------------------------------------------
 add_library(mcrt_native SHARED
     src/api.cpp
+    src/bevel.cpp
     src/denoiser.cpp
     src/material_store.cpp
     src/renderer.cpp
     src/section_manager.cpp
+    src/shapes.cpp
     src/terrain_mesher.cpp
     src/vk_context.cpp
     src/vma_impl.cpp)

@@ -192,6 +192,26 @@ MaterialSample sampleTriplanar(uint materialId, float3 pos, float3 n, float dist
     return result;
 }
 
+// Smoothed blocks that keep Minecraft's texture (ores): triplanar over the block's atlas sprite,
+// one sprite per block like vanilla. Sprite origin is packed in the color, width in the word.
+void applySmoothAtlasSprite(inout SurfaceSample s, BlockVertex v, float3 smoothNormal)
+{
+    float2 origin = float2(v.color & 0xFFFF, v.color >> 16) / 65535.0;
+    float width = float(v.light >> 16) / 65535.0;
+    float2 size = float2(width, width * frame.atmosphere.z / max(frame.atmosphere.w, 1.0));
+    float3 pos = WorldRayOrigin() + WorldRayDirection() * RayTCurrent() - s.geometricNormal * 0.001;
+    float3 local = pos - floor(pos);
+    float3 weights = pow(abs(smoothNormal), 4.0);
+    weights /= weights.x + weights.y + weights.z;
+    float3 color = 0.0;
+    color += blockAtlas.SampleLevel(atlasSampler, origin + float2(local.z, 1.0 - local.y) * size, 0).rgb * weights.x;
+    color += blockAtlas.SampleLevel(atlasSampler, origin + float2(local.x, local.z) * size, 0).rgb * weights.y;
+    color += blockAtlas.SampleLevel(atlasSampler, origin + float2(local.x, 1.0 - local.y) * size, 0).rgb * weights.z;
+    s.albedo = pow(color, 2.2);
+    s.normal = smoothNormal;
+    s.roughness = 0.8;
+}
+
 // Smoothed terrain: top material on gentle slopes, side material on steep ones, blended between.
 void applySmoothMaterial(inout SurfaceSample s, uint word, float3 smoothNormal, float3 tint)
 {
@@ -242,11 +262,13 @@ static const int PARALLAX_STEPS = 12;
 float2 parallaxOffset(float2 uv, float layer, float lod, float3 n, float3 tangent, float3 bitangent, float scale,
                       float distance)
 {
-    float amplitude = PARALLAX_DEPTH * saturate(1.0 - distance / PARALLAX_DISTANCE);
+    float3 v = -WorldRayDirection();
+    float cosView = dot(v, n);
+    // Fade out with distance and at grazing angles, where the offset would smear the texture.
+    float amplitude = PARALLAX_DEPTH * saturate(1.0 - distance / PARALLAX_DISTANCE) * saturate((cosView - 0.15) * 3.0);
     if (amplitude <= 0.0)
         return uv;
-    float3 v = -WorldRayDirection();
-    float vz = max(dot(v, n), 0.15);
+    float vz = max(cosView, 0.3);
     // UV change per block of depth along the view ray (u follows the tangent, v runs against the bitangent).
     float2 uvPerDepth = float2(-dot(v, tangent), dot(v, bitangent)) / (vz * scale);
 
@@ -381,7 +403,10 @@ SurfaceSample fetchSurface(BuiltInTriangleIntersectionAttributes attribs, uint f
             smoothNormal = -smoothNormal;
         s.albedo = 1.0;
         s.alpha = 1.0;
-        applySmoothMaterial(s, v0.light, smoothNormal, tint.rgb);
+        if ((v0.light & 2) != 0)
+            applySmoothAtlasSprite(s, v0, smoothNormal);
+        else
+            applySmoothMaterial(s, v0.light, smoothNormal, tint.rgb);
         if (dot(s.normal, n) < 0.05)
             s.normal = normalize(s.normal + n * (0.05 - dot(s.normal, n)));
         return s;
