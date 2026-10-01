@@ -74,7 +74,11 @@ Vec3 trunkPoint(uint32_t shape, float a, float b, float c) {
     }
 }
 
-void appendLeafCards(std::vector<uint8_t>& cutout, Vec3 base, uint32_t seed, const BlockLook& look, bool needles) {
+// pull: where the rest of the canopy lies (from this block, length 0..1); exposure: 0..1, how much
+// of the block faces open air. Exposed blocks at the canopy's corners get smaller cards pulled
+// inwards, so a tree's outline rounds off instead of tracing its blocks.
+void appendLeafCards(std::vector<uint8_t>& cutout, Vec3 base, uint32_t seed, const BlockLook& look, bool needles,
+                     Vec3 pull, float exposure) {
     // Tinted leaves use the procedural foliage textures (the vertex color carries the biome
     // foliage color); untinted ones (cherry, azalea...) keep their own sprite.
     const uint32_t foliage = terrain::cardMaterial(needles ? terrain::kCardNeedle : terrain::kCardBroadleaf);
@@ -87,14 +91,17 @@ void appendLeafCards(std::vector<uint8_t>& cutout, Vec3 base, uint32_t seed, con
         uint32_t state = seed * 3 + uint32_t(i);
         float yaw = unit(state) * kPi + float(i) * kPi / kCardsPerLeaf;
         float tilt = (unit(state) - 0.5f) * 0.9f;
-        Vec3 center{base.x + 0.5f + (unit(state) - 0.5f) * 0.6f, base.y + 0.5f + (unit(state) - 0.5f) * 0.6f,
-                    base.z + 0.5f + (unit(state) - 0.5f) * 0.6f};
+        const float inward = 0.45f * exposure;
+        Vec3 center{base.x + 0.5f + (unit(state) - 0.5f) * 0.6f + pull.x * inward,
+                    base.y + 0.5f + (unit(state) - 0.5f) * 0.6f + pull.y * inward,
+                    base.z + 0.5f + (unit(state) - 0.5f) * 0.6f + pull.z * inward};
+        const float half = kCardHalfSize * (1.0f - 0.35f * exposure * exposure) * (0.85f + 0.3f * unit(state));
         Vec3 u{std::cos(yaw), 0.0f, std::sin(yaw)};
         // "Up" leaning by `tilt` around u.
         Vec3 v{-std::sin(yaw) * std::sin(tilt), std::cos(tilt), std::cos(yaw) * std::sin(tilt)};
         auto corner = [&](float su, float sv) {
-            return Vec3{center.x + (u.x * su + v.x * sv) * kCardHalfSize, center.y + (u.y * su + v.y * sv) * kCardHalfSize,
-                        center.z + (u.z * su + v.z * sv) * kCardHalfSize};
+            return Vec3{center.x + (u.x * su + v.x * sv) * half, center.y + (u.y * su + v.y * sv) * half,
+                        center.z + (u.z * su + v.z * sv) * half};
         };
         uint8_t* q = appendQuad(cutout);
         putVertex(q, corner(-1, -1), look.color, s.u0, s.v1, word);
@@ -215,7 +222,35 @@ void appendShapes(std::vector<uint8_t>& solid, std::vector<uint8_t>& cutout, int
         if (shape == kLeaves || shape == kNeedles) {
             uint32_t seed = hash(uint32_t(sectionX * 16 + x) * 73856093u ^ uint32_t(sectionY * 16 + y) * 19349663u ^
                                  uint32_t(sectionZ * 16 + z) * 83492791u);
-            appendLeafCards(cutout, base, seed, look, shape == kNeedles);
+            // Neighboring foliage (26-neighborhood; outside the section counts as foliage, so
+            // canopies spanning sections stay consistent enough).
+            auto foliageAt = [&](int nx, int ny, int nz) {
+                if (nx < 0 || nx > 15 || ny < 0 || ny > 15 || nz < 0 || nz > 15)
+                    return true;
+                const uint32_t s = shapeOf(blockMaterials, (ny << 8) | (nz << 4) | nx);
+                return s == kLeaves || s == kNeedles || s == kLogX || s == kLogY || s == kLogZ;
+            };
+            int faces = 0, around = 0;
+            Vec3 pull{0.0f, 0.0f, 0.0f};
+            for (int dy = -1; dy <= 1; ++dy)
+                for (int dz = -1; dz <= 1; ++dz)
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        if ((dx | dy | dz) == 0 || !foliageAt(x + dx, y + dy, z + dz))
+                            continue;
+                        ++around;
+                        if (std::abs(dx) + std::abs(dy) + std::abs(dz) == 1)
+                            ++faces;
+                        pull.x += float(dx);
+                        pull.y += float(dy);
+                        pull.z += float(dz);
+                    }
+            if (faces == 6 && around == 26)
+                continue; // buried in the canopy: never seen
+            const float len = std::sqrt(pull.x * pull.x + pull.y * pull.y + pull.z * pull.z);
+            if (len > 1e-3f)
+                pull = {pull.x / len, pull.y / len, pull.z / len};
+            const float exposure = 1.0f - float(around) / 26.0f;
+            appendLeafCards(cutout, base, seed, look, shape == kNeedles, pull, exposure);
         } else if (shape != kHidden && look.side.u1 > look.side.u0) {
             appendTrunk(solid, base, shape, blockMaterials[local], look);
         }
