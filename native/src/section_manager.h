@@ -5,6 +5,7 @@
 
 #include <array>
 #include <cstdint>
+#include <future>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -48,10 +49,15 @@ public:
     SectionManager& operator=(const SectionManager&) = delete;
 
     // Thread-safe producers.
-    void enqueueUpdate(int32_t x, int32_t y, int32_t z, const void* solid, uint32_t solidVertices, const void* cutout,
+    // Thread-safe and expensive (terrain meshing etc.): builds a section update without queuing it,
+    // so callers can do it outside their own locks. Hand the result to commitUpdate (queue it) or
+    // discardUpdate.
+    void* prepareUpdate(int32_t x, int32_t y, int32_t z, const void* solid, uint32_t solidVertices, const void* cutout,
                        uint32_t cutoutVertices, const void* translucent, uint32_t translucentVertices,
                        const uint32_t* lights, uint32_t lightCount, const uint32_t* blockMaterials,
                        const uint8_t* occupancy);
+    void commitUpdate(void* prepared);
+    static void discardUpdate(void* prepared);
     void enqueueRemove(int32_t x, int32_t y, int32_t z);
     void enqueueClear();
     // See mcrt_far_terrain. Stored as a pseudo-section above the build limit (kFarSectionY), as
@@ -121,6 +127,25 @@ private:
     void ensureStaging(uint32_t slot, VkDeviceSize bytes, uint64_t retireValue);
     void ensureScratch(VkDeviceSize bytes, uint64_t retireValue);
     void rebuildLights(uint64_t retireValue);
+
+    // Light lists are computed on a background thread from a snapshot of the resident sections
+    // (it takes milliseconds with thousands of sections) and swapped in when ready.
+    struct LightSnapshotEntry {
+        int32_t x, y, z;
+        uint32_t slot;
+        std::vector<GpuLight> lights;
+    };
+    struct LightBuild {
+        std::vector<uint32_t> ranges; // 4 per slot
+        std::vector<GpuLight> list;
+        size_t totalLights = 0;
+        uint32_t capacity = 0;
+        float milliseconds = 0.0f;
+    };
+    static LightBuild computeLights(const std::vector<LightSnapshotEntry>& sections, uint32_t capacity);
+    std::vector<LightSnapshotEntry> snapshotLights() const;
+    void applyLights(LightBuild&& build, uint64_t retireValue);
+    std::future<LightBuild> lightJob_;
 
     VkContext& ctx_;
     DeletionQueue& deletion_;

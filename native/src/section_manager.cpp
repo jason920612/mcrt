@@ -1,5 +1,8 @@
 #include "section_manager.h"
 
+#include <future>
+#include <memory>
+
 #include "mcrt/api.h"
 #include "bevel.h"
 #include "shapes.h"
@@ -106,6 +109,8 @@ void SectionManager::destroyAll() {
         destroyAccelerationStructure(ctx_, section.translucent);
         ctx_.destroyBuffer(section.vertices);
     }
+    if (lightJob_.valid())
+        lightJob_.wait();
     resident_.clear();
     pending_.clear();
     for (Buffer& buffer : staging_)
@@ -123,7 +128,7 @@ uint64_t SectionManager::key(int32_t x, int32_t y, int32_t z) {
            (static_cast<uint64_t>(static_cast<uint32_t>(y) & 0xFFFFF));
 }
 
-void SectionManager::enqueueUpdate(int32_t x, int32_t y, int32_t z, const void* solid, uint32_t solidVertices,
+void* SectionManager::prepareUpdate(int32_t x, int32_t y, int32_t z, const void* solid, uint32_t solidVertices,
                                    const void* cutout, uint32_t cutoutVertices, const void* translucent,
                                    uint32_t translucentVertices, const uint32_t* lights, uint32_t lightCount,
                                    const uint32_t* blockMaterials, const uint8_t* occupancy) {
@@ -192,9 +197,17 @@ void SectionManager::enqueueUpdate(int32_t x, int32_t y, int32_t z, const void* 
     op.data.reserve(layers[0].size() + layers[1].size() + layers[2].size());
     for (auto& layer : layers)
         op.data.insert(op.data.end(), layer.begin(), layer.end());
+    return new Op(std::move(op));
+}
 
+void SectionManager::commitUpdate(void* prepared) {
+    std::unique_ptr<Op> op(static_cast<Op*>(prepared));
     std::lock_guard lock(incomingMutex_);
-    incoming_.push_back(std::move(op));
+    incoming_.push_back(std::move(*op));
+}
+
+void SectionManager::discardUpdate(void* prepared) {
+    delete static_cast<Op*>(prepared);
 }
 
 void SectionManager::enqueueRemove(int32_t x, int32_t y, int32_t z) {
@@ -602,45 +615,71 @@ bool SectionManager::recordUpdates(VkCommandBuffer cmd, uint32_t slot, uint64_t 
 
     lightsDirty_ |= changed;
     ++framesSinceLightRebuild_;
-    // Residency changes must reach the light table, but rebuilding it every frame while chunks
-    // stream in is wasted work; a grown slot table, however, must be covered immediately.
-    if (lightsDirty_ && (framesSinceLightRebuild_ >= kLightRebuildInterval || lightRangesCapacity_ < infoCapacity_))
+    // A grown slot table must be covered immediately (the shader indexes it by slot).
+    if (lightRangesCapacity_ < infoCapacity_) {
         rebuildLights(retireValue);
+        return changed;
+    }
+    // Otherwise residency changes reach the light table through a background rebuild, at most
+    // every kLightRebuildInterval frames while chunks stream in.
+    if (lightJob_.valid() && lightJob_.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+        applyLights(lightJob_.get(), retireValue);
+    if (lightsDirty_ && !lightJob_.valid() && framesSinceLightRebuild_ >= kLightRebuildInterval) {
+        lightJob_ = std::async(std::launch::async, [sections = snapshotLights(), capacity = infoCapacity_]() {
+            return computeLights(sections, capacity);
+        });
+        lightsDirty_ = false;
+        framesSinceLightRebuild_ = 0;
+    }
     return changed;
 }
 
-void SectionManager::rebuildLights(uint64_t retireValue) {
-    lightGeneration_ = (lightGeneration_ + 1) & 0xFFFFFF; // exact in a float uniform
+std::vector<SectionManager::LightSnapshotEntry> SectionManager::snapshotLights() const {
+    std::vector<LightSnapshotEntry> sections;
+    sections.reserve(resident_.size());
+    for (const auto& [k, section] : resident_)
+        sections.push_back({section.x, section.y, section.z, section.slot, section.lights});
+    return sections;
+}
+
+SectionManager::LightBuild SectionManager::computeLights(const std::vector<LightSnapshotEntry>& sections,
+                                                         uint32_t capacity) {
     const auto started = std::chrono::steady_clock::now();
     // Each section lists the lights of its 3x3x3 neighborhood (block light reaches 15 blocks).
     // Dense emitters (lava lakes) would make that list huge, so beyond kMaxLightsPerSection it is a
     // stratified sample whose entries each stand for count / kept lights.
     constexpr size_t kMaxLightsPerSection = 256;
-    totalLights_ = 0;
-    for (const auto& [k, owner] : resident_)
-        totalLights_ += owner.lights.size();
-
-    std::vector<uint32_t> ranges(size_t(infoCapacity_) * 4, 0);
-    std::vector<GpuLight> list;
-    if (totalLights_ > 0) {
+    LightBuild build;
+    build.capacity = capacity;
+    build.ranges.assign(size_t(capacity) * 4, 0);
+    std::unordered_map<uint64_t, const std::vector<GpuLight>*> byKey;
+    byKey.reserve(sections.size());
+    for (const LightSnapshotEntry& section : sections) {
+        build.totalLights += section.lights.size();
+        if (!section.lights.empty())
+            byKey[key(section.x, section.y, section.z)] = &section.lights;
+    }
+    if (build.totalLights > 0) {
         std::vector<const std::vector<GpuLight>*> sources;
-        for (const auto& [k, section] : resident_) {
+        for (const LightSnapshotEntry& section : sections) {
+            if (section.slot >= capacity)
+                continue;
             sources.clear();
             size_t available = 0;
             for (int dx = -1; dx <= 1; ++dx)
                 for (int dy = -1; dy <= 1; ++dy)
                     for (int dz = -1; dz <= 1; ++dz) {
-                        auto it = resident_.find(key(section.x + dx, section.y + dy, section.z + dz));
-                        if (it != resident_.end() && !it->second.lights.empty()) {
-                            sources.push_back(&it->second.lights);
-                            available += it->second.lights.size();
+                        auto it = byKey.find(key(section.x + dx, section.y + dy, section.z + dz));
+                        if (it != byKey.end()) {
+                            sources.push_back(it->second);
+                            available += it->second->size();
                         }
                     }
             if (available == 0)
                 continue;
             const size_t kept = std::min(available, kMaxLightsPerSection);
-            const size_t offset = list.size();
-            // Stratified pick of `kept` lights across the concatenated neighborhood lists.
+            const size_t offset = build.list.size();
+            // Stratified pick of the kept lights across the concatenated neighborhood lists.
             size_t source = 0, base = 0;
             for (size_t i = 0; i < kept; ++i) {
                 size_t index = (i * available) / kept + (available / kept) / 2;
@@ -648,26 +687,35 @@ void SectionManager::rebuildLights(uint64_t retireValue) {
                     base += sources[source]->size();
                     ++source;
                 }
-                list.push_back((*sources[source])[index - base]);
+                build.list.push_back((*sources[source])[index - base]);
             }
             const float weight = float(available) / float(kept);
             uint32_t weightBits;
             std::memcpy(&weightBits, &weight, sizeof(weightBits));
-            uint32_t* range = &ranges[size_t(section.slot) * 4];
+            uint32_t* range = &build.ranges[size_t(section.slot) * 4];
             range[0] = static_cast<uint32_t>(offset);
             range[1] = static_cast<uint32_t>(kept);
             range[2] = weightBits;
         }
     }
-    if (list.empty())
-        list.push_back({});
+    if (build.list.empty())
+        build.list.push_back({});
+    build.milliseconds =
+        std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - started).count();
+    return build;
+}
 
-    Buffer newRanges = ctx_.createBuffer(ranges.size() * sizeof(uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+void SectionManager::applyLights(LightBuild&& build, uint64_t retireValue) {
+    lightGeneration_ = (lightGeneration_ + 1) & 0xFFFFFF; // exact in a float uniform
+    // The slot table may have grown while the lists were computed: cover it (new slots get no
+    // lights until the next rebuild).
+    build.ranges.resize(size_t(std::max(build.capacity, infoCapacity_)) * 4, 0);
+    Buffer newRanges = ctx_.createBuffer(build.ranges.size() * sizeof(uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                                          MemoryKind::HostUpload);
-    ctx_.writeBuffer(newRanges, ranges.data(), newRanges.size);
-    Buffer newList = ctx_.createBuffer(list.size() * sizeof(GpuLight), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+    ctx_.writeBuffer(newRanges, build.ranges.data(), newRanges.size);
+    Buffer newList = ctx_.createBuffer(build.list.size() * sizeof(GpuLight), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                                        MemoryKind::HostUpload);
-    ctx_.writeBuffer(newList, list.data(), newList.size);
+    ctx_.writeBuffer(newList, build.list.data(), newList.size);
 
     Buffer oldRanges = lightRanges_, oldList = lightList_;
     deletion_.push(retireValue, [this, oldRanges, oldList]() mutable {
@@ -676,10 +724,18 @@ void SectionManager::rebuildLights(uint64_t retireValue) {
     });
     lightRanges_ = newRanges;
     lightList_ = newList;
-    lightRangesCapacity_ = infoCapacity_;
+    lightRangesCapacity_ = uint32_t(build.ranges.size() / 4);
+    totalLights_ = build.totalLights;
+    lastLightRebuildMs_ = build.milliseconds;
+}
+
+void SectionManager::rebuildLights(uint64_t retireValue) {
+    if (lightJob_.valid())
+        lightJob_.wait(); // superseded by this synchronous rebuild
+    lightJob_ = {};
+    applyLights(computeLights(snapshotLights(), infoCapacity_), retireValue);
     lightsDirty_ = false;
     framesSinceLightRebuild_ = 0;
-    lastLightRebuildMs_ = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - started).count();
 }
 
 void SectionManager::appendInstances(std::vector<VkAccelerationStructureInstanceKHR>& out,

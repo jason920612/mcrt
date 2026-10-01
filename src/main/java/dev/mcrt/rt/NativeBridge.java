@@ -60,6 +60,7 @@ final class NativeBridge {
 	private final MethodHandle create;
 	private final MethodHandle renderFrame;
 	private final MethodHandle sectionUpdate;
+	private final MethodHandle sectionCommit;
 	private final MethodHandle sectionRemove;
 	private final MethodHandle sectionsClear;
 	private final MethodHandle farTerrain;
@@ -75,9 +76,11 @@ final class NativeBridge {
 			FunctionDescriptor.of(ADDRESS, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_INT));
 		this.renderFrame = linker.downcallHandle(lib.findOrThrow("mcrt_render_frame"),
 			FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS, ADDRESS));
-		this.sectionUpdate = linker.downcallHandle(lib.findOrThrow("mcrt_section_update"),
-			FunctionDescriptor.ofVoid(ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT,
+		this.sectionUpdate = linker.downcallHandle(lib.findOrThrow("mcrt_section_prepare"),
+			FunctionDescriptor.of(JAVA_LONG, ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT,
 				ADDRESS, JAVA_INT, ADDRESS, JAVA_INT, ADDRESS, JAVA_INT, ADDRESS, JAVA_INT, ADDRESS, ADDRESS));
+		this.sectionCommit = linker.downcallHandle(lib.findOrThrow("mcrt_section_commit"),
+			FunctionDescriptor.ofVoid(ADDRESS, JAVA_LONG, JAVA_INT));
 		this.sectionRemove = linker.downcallHandle(lib.findOrThrow("mcrt_section_remove"),
 			FunctionDescriptor.ofVoid(ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT));
 		this.sectionsClear = linker.downcallHandle(lib.findOrThrow("mcrt_sections_clear"),
@@ -127,13 +130,21 @@ final class NativeBridge {
 		}
 	}
 
-	void sectionUpdate(MemorySegment ctx, int x, int y, int z,
+	long sectionPrepare(MemorySegment ctx, int x, int y, int z,
 			MemorySegment solid, int solidVertices, MemorySegment cutout, int cutoutVertices,
 			MemorySegment translucent, int translucentVertices, MemorySegment lights, int lightCount,
 			MemorySegment blockMaterials, MemorySegment occupancy) {
 		try {
-			sectionUpdate.invokeExact(ctx, x, y, z, solid, solidVertices, cutout, cutoutVertices, translucent, translucentVertices,
-				lights, lightCount, blockMaterials, occupancy);
+			return (long) sectionUpdate.invokeExact(ctx, x, y, z, solid, solidVertices, cutout, cutoutVertices, translucent,
+				translucentVertices, lights, lightCount, blockMaterials, occupancy);
+		} catch (Throwable t) {
+			throw new RuntimeException(t);
+		}
+	}
+
+	void sectionCommit(MemorySegment ctx, long prepared, boolean commit) {
+		try {
+			sectionCommit.invokeExact(ctx, prepared, commit ? 1 : 0);
 		} catch (Throwable t) {
 			throw new RuntimeException(t);
 		}

@@ -1,7 +1,6 @@
 package dev.mcrt.rt;
 
 import com.mojang.blaze3d.vertex.MeshData;
-import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import java.util.Map;
 import net.minecraft.client.renderer.chunk.ChunkSectionLayer;
 import net.minecraft.client.renderer.chunk.RenderSectionRegion;
@@ -12,25 +11,29 @@ import net.minecraft.core.SectionPos;
  * Forwards Minecraft's compiled section meshes to the native renderer.
  *
  * <p>Sections compile on worker threads while the render thread may reset (unload or move) them.
- * A compile that finishes after its section was reset must not resurrect stale geometry, so the
- * live-section check and the native enqueue happen under one lock, as does every removal.
+ * A compile that finishes after its section was reset must not resurrect stale geometry. The
+ * expensive native preparation runs without locks (the render thread reassigns sections constantly
+ * while the player moves and must never wait for it); only the final, cheap commit happens under
+ * the lock, and only if the section is still assigned exactly as it was when the work began.
  */
 public final class SectionCapture {
 	static final Object LOCK = new Object();
-	private static final LongOpenHashSet LIVE = new LongOpenHashSet();
+	/** Live sections and their assignment epoch (bumped whenever a section is (re)assigned). */
+	private static final it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap LIVE = new it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap();
+	private static int nextEpoch = 1;
 
 	private SectionCapture() {
 	}
 
 	public static void onAssigned(long sectionNode) {
 		synchronized (LOCK) {
-			LIVE.add(sectionNode);
+			LIVE.put(sectionNode, nextEpoch++);
 		}
 	}
 
 	public static void onReset(long sectionNode) {
 		synchronized (LOCK) {
-			if (LIVE.remove(sectionNode) && RtRenderer.get().isActive()) {
+			if (LIVE.containsKey(sectionNode) && LIVE.remove(sectionNode) != 0 && RtRenderer.get().isActive()) {
 				RtRenderer.get().removeSection(SectionPos.x(sectionNode), SectionPos.y(sectionNode), SectionPos.z(sectionNode));
 			}
 		}
@@ -41,17 +44,23 @@ public final class SectionCapture {
 		if (!renderer.isActive()) {
 			return;
 		}
+		long node = pos.asLong();
+		int epoch;
+		synchronized (LOCK) {
+			epoch = LIVE.get(node);
+		}
+		if (epoch == 0) {
+			return;
+		}
 		Map<ChunkSectionLayer, MeshData> layers = results.renderedLayers;
 		SectionScanner.Result scan = layers.isEmpty() ? null : SectionScanner.scan(region, pos, renderer.materials());
+		long prepared = renderer.prepareSection(pos.x(), pos.y(), pos.z(),
+			layers.get(ChunkSectionLayer.SOLID),
+			layers.get(ChunkSectionLayer.CUTOUT),
+			layers.get(ChunkSectionLayer.TRANSLUCENT),
+			scan);
 		synchronized (LOCK) {
-			if (!LIVE.contains(pos.asLong()) || !renderer.isActive()) {
-				return;
-			}
-			renderer.updateSection(pos.x(), pos.y(), pos.z(),
-				layers.get(ChunkSectionLayer.SOLID),
-				layers.get(ChunkSectionLayer.CUTOUT),
-				layers.get(ChunkSectionLayer.TRANSLUCENT),
-				scan);
+			renderer.commitSection(prepared, LIVE.get(node) == epoch);
 		}
 	}
 }

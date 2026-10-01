@@ -85,12 +85,16 @@ MCRT_API int32_t mcrt_render_frame(McrtContext* ctx, const McrtFrameInput* input
 // 3 thin snow cover, 4 see-through full block; then 22^3 uint16 top | side << 8 materials of the
 // smooth blocks in that grid; then 22^2 uint32 RGBA8 grass colors of its columns.
 // Smooth blocks are re-meshed as smoothed terrain; their own quads (and cover quads) are dropped.
-MCRT_API void mcrt_section_update(McrtContext* ctx, int32_t section_x, int32_t section_y, int32_t section_z,
+MCRT_API uint64_t mcrt_section_prepare(McrtContext* ctx, int32_t section_x, int32_t section_y, int32_t section_z,
                                   const void* solid, uint32_t solid_vertices,
                                   const void* cutout, uint32_t cutout_vertices,
                                   const void* translucent, uint32_t translucent_vertices,
                                   const uint32_t* lights, uint32_t light_count,
                                   const uint32_t* block_materials, const uint8_t* occupancy);
+
+// Thread-safe. Queues (commit != 0) or drops a prepared section update. mcrt_section_prepare does
+// all the work (meshing) and may run concurrently on many threads; this is cheap.
+MCRT_API void mcrt_section_commit(McrtContext* ctx, uint64_t prepared, int32_t commit);
 
 // Thread-safe. Uploads material `index` (0-based; shaders see id index + 1) of `count` from a whole
 // .mcm file (tools/materials/build_materials.py): block-compressed mip chains of albedo+height,

@@ -101,6 +101,9 @@ loom {
 			if (project.hasProperty('mcrtCheckerboard')) {
 				vmArgs "-Dmcrt.checkerboard=${project.property('mcrtCheckerboard')}"
 			}
+			if (project.hasProperty('mcrtDevFly')) {
+				vmArgs "-Dmcrt.devFly=${project.property('mcrtDevFly')}"
+			}
 			if (project.hasProperty('mcrtDevSpin')) {
 				vmArgs "-Dmcrt.devSpin=${project.property('mcrtDevSpin')}"
 			}

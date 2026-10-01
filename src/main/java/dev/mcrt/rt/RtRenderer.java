@@ -97,15 +97,16 @@ public final class RtRenderer {
 
 	/** Any thread: hands a sampled far landscape to the native renderer. */
 	void submitFarTerrain(int originX, int originZ, int size, int spacing, int seaLevel, float[] heights, int[] colors) {
-		synchronized (SectionCapture.LOCK) {
+		nativeUse.readLock().lock();
+		try (Arena arena = Arena.ofConfined()) {
 			if (!isActive()) {
 				return;
 			}
-			try (Arena arena = Arena.ofConfined()) {
-				MemorySegment[] segments = new MemorySegment[2];
-				FarTerrain.copyTo(arena, heights, colors, segments);
-				bridge.farTerrain(ctx, originX, originZ, size, spacing, seaLevel, segments[0], segments[1]);
-			}
+			MemorySegment[] segments = new MemorySegment[2];
+			FarTerrain.copyTo(arena, heights, colors, segments);
+			bridge.farTerrain(ctx, originX, originZ, size, spacing, seaLevel, segments[0], segments[1]);
+		} finally {
+			nativeUse.readLock().unlock();
 		}
 	}
 
@@ -120,20 +121,43 @@ public final class RtRenderer {
 		return materials;
 	}
 
-	// Called with SectionCapture.LOCK held. scan is null for sections without geometry.
-	void updateSection(int x, int y, int z, MeshData solid, MeshData cutout, MeshData translucent, SectionScanner.Result scan) {
+	/**
+	 * Guards the native context against shutdown while worker threads use it outside
+	 * SectionCapture.LOCK (section preparation, far terrain): they hold the read lock, shutdown the
+	 * write lock.
+	 */
+	private final java.util.concurrent.locks.ReentrantReadWriteLock nativeUse = new java.util.concurrent.locks.ReentrantReadWriteLock();
+
+	/**
+	 * Any thread, no locks held: builds a section update natively (the expensive part), returning a
+	 * handle for {@link #commitSection}, or 0. scan is null for sections without geometry.
+	 */
+	long prepareSection(int x, int y, int z, MeshData solid, MeshData cutout, MeshData translucent, SectionScanner.Result scan) {
+		nativeUse.readLock().lock();
 		try (Arena arena = Arena.ofConfined()) {
+			if (!isActive()) {
+				return 0;
+			}
 			int[] emitters = scan == null ? new int[0] : scan.emitters();
 			MemorySegment lights = emitters.length == 0 ? MemorySegment.NULL : arena.allocateFrom(JAVA_INT, emitters);
 			MemorySegment blockMaterials = scan == null || scan.materials() == null
 				? MemorySegment.NULL : arena.allocateFrom(JAVA_INT, scan.materials());
 			MemorySegment occupancy = scan == null || scan.occupancy() == null
 				? MemorySegment.NULL : arena.allocateFrom(java.lang.foreign.ValueLayout.JAVA_BYTE, scan.occupancy());
-			bridge.sectionUpdate(ctx, x, y, z,
+			return bridge.sectionPrepare(ctx, x, y, z,
 				vertices(solid), vertexCount(solid),
 				vertices(cutout), vertexCount(cutout),
 				vertices(translucent), vertexCount(translucent),
 				lights, emitters.length, blockMaterials, occupancy);
+		} finally {
+			nativeUse.readLock().unlock();
+		}
+	}
+
+	/** Called with SectionCapture.LOCK held: queues (or drops) a prepared section update. */
+	void commitSection(long prepared, boolean commit) {
+		if (prepared != 0 && isActive()) {
+			bridge.sectionCommit(ctx, prepared, commit);
 		}
 	}
 
@@ -253,12 +277,40 @@ public final class RtRenderer {
 		}
 	}
 
+	private long lastFrameNanos;
+	private long worstFrameNanos;
+	private int framesOver25, framesOver50;
+	private final float[] frameTimes = new float[4096];
+	private int frameTimeCount;
+
 	private void logStatsPeriodically() {
 		statsWindowFrames++;
 		long now = System.nanoTime();
+		if (lastFrameNanos != 0) {
+			long frame = now - lastFrameNanos;
+			worstFrameNanos = Math.max(worstFrameNanos, frame);
+			framesOver25 += frame > 25_000_000L ? 1 : 0;
+			framesOver50 += frame > 50_000_000L ? 1 : 0;
+			if (frameTimeCount < frameTimes.length) {
+				frameTimes[frameTimeCount++] = frame * 1e-6f;
+			}
+		}
+		lastFrameNanos = now;
 		if (now - statsWindowStart < 5_000_000_000L) {
 			return;
 		}
+		float[] sorted = java.util.Arrays.copyOf(frameTimes, frameTimeCount);
+		java.util.Arrays.sort(sorted);
+		McrtClient.LOGGER.info("[frames] p10={}ms p50={}ms p90={}ms p99={}ms worst={}ms over25ms={} over50ms={}",
+			String.format("%.1f", sorted.length > 0 ? sorted[sorted.length / 10] : 0f),
+			String.format("%.1f", sorted.length > 0 ? sorted[sorted.length / 2] : 0f),
+			String.format("%.1f", sorted.length > 0 ? sorted[sorted.length * 9 / 10] : 0f),
+			String.format("%.1f", sorted.length > 0 ? sorted[Math.min(sorted.length - 1, sorted.length * 99 / 100)] : 0f),
+			String.format("%.1f", worstFrameNanos * 1e-6), framesOver25, framesOver50);
+		frameTimeCount = 0;
+		worstFrameNanos = 0;
+		framesOver25 = 0;
+		framesOver50 = 0;
 		bridge.getStats(ctx, stats);
 		McrtClient.LOGGER.info("[stats] fps={} gpuPass={}ms nativeCpu={}ms lightRebuild={}ms sections={} pending={} instances={} lights={}",
 			String.format("%.1f", statsWindowFrames / ((now - statsWindowStart) * 1e-9)),
@@ -373,13 +425,18 @@ public final class RtRenderer {
 	/** Must run before Minecraft destroys the Vulkan device. */
 	public void shutdown() {
 		synchronized (SectionCapture.LOCK) {
-			if (state == State.READY) {
+			nativeUse.writeLock().lock();
+			try {
+				if (state == State.READY) {
+					state = State.DISABLED;
+					bridge.destroy(ctx);
+					ctx = null;
+					device = null;
+				}
 				state = State.DISABLED;
-				bridge.destroy(ctx);
-				ctx = null;
-				device = null;
+			} finally {
+				nativeUse.writeLock().unlock();
 			}
-			state = State.DISABLED;
 		}
 	}
 

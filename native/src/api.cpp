@@ -46,18 +46,29 @@ MCRT_API int32_t mcrt_render_frame(McrtContext* ctx, const McrtFrameInput* input
     }
 }
 
-MCRT_API void mcrt_section_update(McrtContext* ctx, int32_t section_x, int32_t section_y, int32_t section_z,
+MCRT_API uint64_t mcrt_section_prepare(McrtContext* ctx, int32_t section_x, int32_t section_y, int32_t section_z,
                                   const void* solid, uint32_t solid_vertices, const void* cutout,
                                   uint32_t cutout_vertices, const void* translucent, uint32_t translucent_vertices,
                                   const uint32_t* lights, uint32_t light_count, const uint32_t* block_materials,
                                   const uint8_t* occupancy) {
     try {
-        ctx->renderer->sections().enqueueUpdate(section_x, section_y, section_z, solid, solid_vertices, cutout,
-                                                cutout_vertices, translucent, translucent_vertices, lights,
-                                                light_count, block_materials, occupancy);
+        return reinterpret_cast<uint64_t>(ctx->renderer->sections().prepareUpdate(
+            section_x, section_y, section_z, solid, solid_vertices, cutout, cutout_vertices, translucent,
+            translucent_vertices, lights, light_count, block_materials, occupancy));
     } catch (const std::exception& e) {
-        setError("mcrt_section_update", e);
+        setError("mcrt_section_prepare", e);
+        return 0;
     }
+}
+
+MCRT_API void mcrt_section_commit(McrtContext* ctx, uint64_t prepared, int32_t commit) {
+    if (prepared == 0)
+        return;
+    void* op = reinterpret_cast<void*>(prepared);
+    if (commit)
+        ctx->renderer->sections().commitUpdate(op);
+    else
+        mcrt::SectionManager::discardUpdate(op);
 }
 
 MCRT_API void mcrt_material_upload(McrtContext* ctx, uint32_t index, uint32_t count, uint32_t scale, uint32_t flags,
