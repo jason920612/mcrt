@@ -18,6 +18,7 @@ struct FrameUniforms
     float4 prevViewProj[4];  // last frame's viewProj (columns)
     float4 prevCameraShift;  // block-relative position + this = position relative to last frame's camera
     float4 atmosphere;       // x = cloud layer base (absolute y), zw = block atlas size in texels
+    float4 taa;              // xy = sub-pixel jitter of this frame's primary rays (internal pixels), z = render scale
 };
 
 static const uint SKY_OVERWORLD = 0;

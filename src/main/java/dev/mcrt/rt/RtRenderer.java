@@ -38,6 +38,8 @@ public final class RtRenderer {
 	private static final int DEBUG_MODE = Integer.getInteger("mcrt.debug", 0);
 	/** Light half the pixels per frame (alternating) and let the denoiser fill in; -Dmcrt.checkerboard=false to disable. */
 	private static final boolean CHECKERBOARD = !"false".equals(System.getProperty("mcrt.checkerboard"));
+	/** Internal render resolution relative to the window; the TAA pass upscales. -Dmcrt.renderScale=0.67 etc. */
+	private static final float RENDER_SCALE = Math.clamp(Float.parseFloat(System.getProperty("mcrt.renderScale", "1.0")), 0.5f, 1.0f);
 
 	private enum State { UNINITIALIZED, READY, DISABLED }
 
@@ -183,6 +185,7 @@ public final class RtRenderer {
 		Matrix4f projection = hasLevelProjection ? levelProjection : camera.projectionMatrix;
 		input.set(JAVA_FLOAT, NativeBridge.OFF_PIXEL_SPREAD, 2f / (color.getHeight(0) * Math.abs(projection.m11())));
 		input.set(JAVA_FLOAT, NativeBridge.OFF_CLOUD_HEIGHT, level.cloudHeight);
+		input.set(JAVA_FLOAT, NativeBridge.OFF_RENDER_SCALE, RENDER_SCALE);
 
 		int result = bridge.renderFrame(ctx, input, output);
 		if (result < 0) {

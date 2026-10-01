@@ -151,8 +151,8 @@ bool Denoiser::ensureTargets(uint32_t width, uint32_t height, uint64_t retireVal
     }
     filterA_ = rgba16();
     filterB_ = rgba16();
-    output_ = ctx_.createStorageImage(width, height, VK_FORMAT_R8G8B8A8_UNORM,
-                                      kTargetUsage | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    output_ = ctx_.createStorageImage(width, height, VK_FORMAT_R16G16B16A16_SFLOAT,
+                                      kTargetUsage | VK_IMAGE_USAGE_SAMPLED_BIT);
     const uint32_t groups = ((width + 15) / 16) * ((height + 15) / 16);
     luminancePartials_ = ctx_.createBuffer(groups * sizeof(float), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                                            MemoryKind::DeviceLocal);

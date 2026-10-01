@@ -85,7 +85,10 @@ loom {
 			if (project.hasProperty('mcrtDevTime')) {
 				vmArgs "-Dmcrt.devTime=${project.property('mcrtDevTime')}"
 			}
-			// -PmcrtDevCommands="setblock ~ ~ ~3 glowstone;..." runs server commands once after joining
+			// -PmcrtRenderScale=0.67 renders at 67% resolution and upscales with TAA
+			if (project.hasProperty('mcrtRenderScale')) {
+				vmArgs "-Dmcrt.renderScale=${project.property('mcrtRenderScale')}"
+			}
 			if (project.hasProperty('mcrtDisable')) {
 				vmArgs "-Dmcrt.disable=true"
 			}
@@ -95,6 +98,7 @@ loom {
 			if (project.hasProperty('mcrtDevSpin')) {
 				vmArgs "-Dmcrt.devSpin=${project.property('mcrtDevSpin')}"
 			}
+			// -PmcrtDevCommands="setblock ~ ~ ~3 glowstone;..." runs server commands once after joining
 			if (project.hasProperty('mcrtDevCommands')) {
 				vmArgs "-Dmcrt.devCommands=${project.property('mcrtDevCommands')}"
 			}

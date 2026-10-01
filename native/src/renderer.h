@@ -3,6 +3,7 @@
 #include "deletion_queue.h"
 #include "denoiser.h"
 #include "material_store.h"
+#include "temporal_upscaler.h"
 #include "mcrt/api.h"
 #include "section_manager.h"
 #include "vk_context.h"
@@ -97,7 +98,8 @@ private:
     std::vector<VkAccelerationStructureInstanceKHR> instanceScratch_;
     uint32_t tlasInstanceCount_ = 0;
 
-    std::unique_ptr<Denoiser> denoiser_; // owns the G-buffer and the final image
+    std::unique_ptr<Denoiser> denoiser_; // owns the G-buffer and the composed HDR image
+    std::unique_ptr<TemporalUpscaler> upscaler_; // TAA/upscale to output resolution, final image + depth
     Buffer depth_;                       // float per pixel, copied into the D32 depth target
     uint32_t depthWidth_ = 0, depthHeight_ = 0;
     uint32_t historyIndex_ = 0;          // which denoiser history buffer is current

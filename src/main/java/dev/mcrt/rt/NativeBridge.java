@@ -23,7 +23,7 @@ import java.nio.file.StandardCopyOption;
 final class NativeBridge {
 	static final int VERTEX_STRIDE = 28;
 
-	static final long FRAME_INPUT_SIZE = 288;
+	static final long FRAME_INPUT_SIZE = 304;
 	static final long OFF_COLOR_IMAGE = 0;
 	static final long OFF_DEPTH_IMAGE = 8;
 	static final long OFF_ATLAS_IMAGE = 16;
@@ -49,6 +49,7 @@ final class NativeBridge {
 	static final long OFF_RAIN = 276;
 	static final long OFF_PIXEL_SPREAD = 280;
 	static final long OFF_CLOUD_HEIGHT = 284;
+	static final long OFF_RENDER_SCALE = 288;
 
 	static final long FRAME_OUTPUT_SIZE = 24;
 	static final long OFF_OUT_COMMAND_BUFFER = 0;

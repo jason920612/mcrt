@@ -25,7 +25,7 @@ struct PassParams
 [[vk::binding(6, 0)]] [format("rgba16f")] RWTexture2D<float4> filterB;
 [[vk::binding(7, 0)]] [format("rgba16f")] RWTexture2D<float4> albedoModulation;
 [[vk::binding(8, 0)]] [format("rgba16f")] RWTexture2D<float4> foreground;
-[[vk::binding(9, 0)]] [format("rgba8")] RWTexture2D<float4> outputImage;
+[[vk::binding(9, 0)]] [format("rgba16f")] RWTexture2D<float4> composed; // HDR, exposure applied (taa.slang tonemaps)
 [[vk::binding(10, 0)]] ConstantBuffer<FrameUniforms> frame;
 [[vk::binding(11, 0)]] RWStructuredBuffer<float> exposureState;              // [0] exposure, [1] avg luminance, [2] last time
 [[vk::binding(12, 0)]] RWStructuredBuffer<float> luminancePartials;          // one log-luminance sum per compose group
@@ -248,8 +248,7 @@ void compose(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint gr
         logLuminance = log(max(luminance(color), 1e-4));
 
         float exposure = frame.params.z != 0.0 ? 1.0 : exposureState[0];
-        float3 mapped = frame.params.z != 0.0 ? saturate(color) : acesTonemap(color * exposure);
-        outputImage[p] = float4(pow(mapped, 1.0 / 2.2), 1.0);
+        composed[p] = float4(color * exposure, 1.0);
     }
 
     groupLogLuminance[groupIndex] = logLuminance;

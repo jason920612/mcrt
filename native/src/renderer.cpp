@@ -44,8 +44,9 @@ struct FrameUniforms {
     float prevViewProj[16];
     float prevCameraShift[4];
     float atmosphere[4];
+    float taa[4];
 };
-static_assert(sizeof(FrameUniforms) == 336, "must match FrameUniforms in frame.slang");
+static_assert(sizeof(FrameUniforms) == 352, "must match FrameUniforms in frame.slang");
 
 void memoryBarrier(VkCommandBuffer cmd, VkPipelineStageFlags srcStage, VkAccessFlags srcAccess,
                    VkPipelineStageFlags dstStage, VkAccessFlags dstAccess) {
@@ -73,6 +74,7 @@ Renderer::Renderer(std::unique_ptr<VkContext> context) : ctx_(std::move(context)
     VkDevice device = ctx_->device();
     sections_ = std::make_unique<SectionManager>(*ctx_, deletion_);
     denoiser_ = std::make_unique<Denoiser>(*ctx_, deletion_);
+    upscaler_ = std::make_unique<TemporalUpscaler>(*ctx_, deletion_);
     materials_ = std::make_unique<MaterialStore>(*ctx_, deletion_);
 
     VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
@@ -249,6 +251,7 @@ Renderer::~Renderer() {
     destroyAccelerationStructure(*ctx_, tlas_);
     ctx_->destroyBuffer(tlasScratch_);
     denoiser_.reset();
+    upscaler_.reset();
     materials_.reset();
     ctx_->destroyImage(skyView_);
     ctx_->destroyImage(cloudView_);
@@ -660,7 +663,12 @@ bool Renderer::renderFrame(const McrtFrameInput& input, McrtFrameOutput& output)
     vkResetQueryPool(ctx_->device(), timestamps_, slotIndex * 2, 2);
 
     const uint64_t retireValue = lastSignalValue_ + 1; // the value this frame signals
-    ensureTargets(input.width, input.height, retireValue);
+    // Path tracing and denoising run at the internal resolution; TAA upscales to the window.
+    const float scale = std::clamp(input.render_scale > 0.0f ? input.render_scale : 1.0f, 0.5f, 1.0f);
+    const uint32_t internalWidth = std::max(1u, uint32_t(std::lround(input.width * scale)));
+    const uint32_t internalHeight = std::max(1u, uint32_t(std::lround(input.height * scale)));
+    ensureTargets(internalWidth, internalHeight, retireValue);
+    const bool upscalerReset = upscaler_->ensureTargets(input.width, input.height, retireValue);
     ensureAtlasView(input, retireValue);
 
     VkCommandBuffer cmd = slot.commandBuffer;
@@ -674,6 +682,7 @@ bool Renderer::renderFrame(const McrtFrameInput& input, McrtFrameOutput& output)
     fullBarrier(cmd);
     vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, timestamps_, slotIndex * 2);
     denoiser_->recordTargetInit(cmd);
+    upscaler_->recordTargetInit(cmd);
     materials_->recordUploads(cmd, retireValue);
 
     sections_->recordUpdates(cmd, slotIndex, retireValue, input.camera_block_pos);
@@ -702,8 +711,20 @@ bool Renderer::renderFrame(const McrtFrameInput& input, McrtFrameOutput& output)
     uniforms.params[2] = static_cast<float>(input.debug_mode);
     uniforms.params[3] = input.rain;
     uniforms.frameInfo[0] = input.frame_index;
-    uniforms.frameInfo[1] = input.width;
-    uniforms.frameInfo[2] = input.height;
+    uniforms.frameInfo[1] = internalWidth;
+    uniforms.frameInfo[2] = internalHeight;
+    // Halton(2, 3) sub-pixel jitter, 8-frame cycle.
+    auto halton = [](uint32_t index, uint32_t base) {
+        float f = 1.0f, r = 0.0f;
+        for (; index > 0; index /= base) {
+            f /= float(base);
+            r += f * float(index % base);
+        }
+        return r;
+    };
+    uniforms.taa[0] = halton(input.frame_index % 8 + 1, 2) - 0.5f;
+    uniforms.taa[1] = halton(input.frame_index % 8 + 1, 3) - 0.5f;
+    uniforms.taa[2] = scale;
     uniforms.frameInfo[3] = input.flags;
     for (int i = 0; i < 3; ++i)
         uniforms.cameraBlock[i] = input.camera_block_pos[i];
@@ -727,11 +748,15 @@ bool Renderer::renderFrame(const McrtFrameInput& input, McrtFrameOutput& output)
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, pipeline_);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, pipelineLayout_, 0, 1, &slot.descriptorSet,
                             0, nullptr);
-    vkCmdTraceRaysKHR(cmd, &raygenRegion_, &missRegion_, &hitRegion_, &callableRegion_, input.width, input.height, 1);
+    vkCmdTraceRaysKHR(cmd, &raygenRegion_, &missRegion_, &hitRegion_, &callableRegion_, internalWidth, internalHeight, 1);
 
     memoryBarrier(cmd, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, VK_ACCESS_SHADER_WRITE_BIT,
                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
     denoiser_->record(cmd, slotIndex, slot.uniforms, sizeof(FrameUniforms), historyIndex_);
+    memoryBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+                  VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+    upscaler_->record(cmd, slotIndex, slot.uniforms, sizeof(FrameUniforms), denoiser_->output().view,
+                      denoiser_->positions().view, depth_, upscalerReset);
 
     memoryBarrier(cmd, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                   VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
@@ -739,12 +764,12 @@ bool Renderer::renderFrame(const McrtFrameInput& input, McrtFrameOutput& output)
     colorCopy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     colorCopy.dstSubresource = colorCopy.srcSubresource;
     colorCopy.extent = {input.width, input.height, 1};
-    vkCmdCopyImage(cmd, denoiser_->output().image, VK_IMAGE_LAYOUT_GENERAL, reinterpret_cast<VkImage>(input.color_image),
+    vkCmdCopyImage(cmd, upscaler_->output().image, VK_IMAGE_LAYOUT_GENERAL, reinterpret_cast<VkImage>(input.color_image),
                    VK_IMAGE_LAYOUT_GENERAL, 1, &colorCopy);
     VkBufferImageCopy depthCopy{};
     depthCopy.imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
     depthCopy.imageExtent = {input.width, input.height, 1};
-    vkCmdCopyBufferToImage(cmd, depth_.buffer, reinterpret_cast<VkImage>(input.depth_image), VK_IMAGE_LAYOUT_GENERAL,
+    vkCmdCopyBufferToImage(cmd, upscaler_->depth().buffer, reinterpret_cast<VkImage>(input.depth_image), VK_IMAGE_LAYOUT_GENERAL,
                            1, &depthCopy);
 
     vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, timestamps_, slotIndex * 2 + 1);

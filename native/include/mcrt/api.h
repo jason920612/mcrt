@@ -47,6 +47,8 @@ typedef struct McrtFrameInput {
     float rain;
     float pixel_spread;          // angle one pixel subtends at the screen center (radians)
     float cloud_height;          // absolute y of the cloud layer
+    float render_scale;          // internal resolution / output resolution (0.5 .. 1)
+    uint32_t reserved[3];
 } McrtFrameInput;
 
 typedef struct McrtFrameOutput {
@@ -125,7 +127,8 @@ static_assert(offsetof(McrtFrameInput, time_seconds) == 272);
 static_assert(offsetof(McrtFrameInput, rain) == 276);
 static_assert(offsetof(McrtFrameInput, pixel_spread) == 280);
 static_assert(offsetof(McrtFrameInput, cloud_height) == 284);
-static_assert(sizeof(McrtFrameInput) == 288);
+static_assert(offsetof(McrtFrameInput, render_scale) == 288);
+static_assert(sizeof(McrtFrameInput) == 304);
 static_assert(sizeof(McrtFrameOutput) == 24);
 static_assert(sizeof(McrtStats) == 32);
 #endif

@@ -746,7 +746,8 @@ void rayGen()
     uint seed = pcgHash(pixel.x + pixel.y * size.x + frame.frameInfo.x * size.x * size.y);
 
     // Minecraft's image memory is bottom-up, so NDC y follows the row index directly.
-    float2 ndc = ((float2(pixel) + 0.5) / float2(size)) * 2.0 - 1.0;
+    // Sub-pixel jitter per frame; the TAA pass turns it into anti-aliasing (and upscaling).
+    float2 ndc = ((float2(pixel) + 0.5 + frame.taa.xy) / float2(size)) * 2.0 - 1.0;
     float3 a = unproject(ndc, 1.0);
     float3 b = unproject(ndc, 0.5);
     float3 nearPoint = dot(a, a) < dot(b, b) ? a : b;

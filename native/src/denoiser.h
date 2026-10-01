@@ -36,6 +36,7 @@ public:
     const Image& foreground() const { return foreground_; }
     const Image& positions() const { return positions_; }
     const Image& normals(uint32_t index) const { return normals_[index]; }
+    // HDR, exposure applied, at internal resolution (input of the TAA pass).
     const Image& output() const { return output_; }
 
 private:
