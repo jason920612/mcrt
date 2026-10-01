@@ -45,7 +45,7 @@ typedef struct McrtFrameInput {
     float time_seconds;
     float rain;
     float pixel_spread;          // angle one pixel subtends at the screen center (radians)
-    uint32_t reserved;
+    float cloud_height;          // absolute y of the cloud layer
 } McrtFrameInput;
 
 typedef struct McrtFrameOutput {
@@ -121,6 +121,7 @@ static_assert(offsetof(McrtFrameInput, sky_color) == 256);
 static_assert(offsetof(McrtFrameInput, time_seconds) == 272);
 static_assert(offsetof(McrtFrameInput, rain) == 276);
 static_assert(offsetof(McrtFrameInput, pixel_spread) == 280);
+static_assert(offsetof(McrtFrameInput, cloud_height) == 284);
 static_assert(sizeof(McrtFrameInput) == 288);
 static_assert(sizeof(McrtFrameOutput) == 24);
 static_assert(sizeof(McrtStats) == 32);

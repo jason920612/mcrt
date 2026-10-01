@@ -29,7 +29,7 @@ find_program(SLANGC slangc HINTS ${CMAKE_CURRENT_SOURCE_DIR}/../tools/slang/bin 
 set(GEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)
 file(MAKE_DIRECTORY ${GEN_DIR}/shaders)
 
-set(SHADERS pathtrace denoise)
+set(SHADERS pathtrace denoise sky)
 set(SHADER_HEADERS)
 foreach(name IN LISTS SHADERS)
     set(spv ${GEN_DIR}/shaders/${name}.spv)

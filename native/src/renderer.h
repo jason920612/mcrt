@@ -40,6 +40,8 @@ private:
     };
 
     void createDescriptors();
+    void createSkyPass();
+    void recordSkyPass(VkCommandBuffer cmd, FrameSlot& slot, uint32_t slotIndex);
     void createPipeline();
     void createShaderBindingTable();
     void ensureTargets(uint32_t width, uint32_t height, uint64_t retireValue);
@@ -67,6 +69,20 @@ private:
     VkPipeline pipeline_ = VK_NULL_HANDLE;
     VkDescriptorPool descriptorPool_ = VK_NULL_HANDLE;
     VkSampler atlasSampler_ = VK_NULL_HANDLE;
+
+    // Sky-view and cloud LUTs (sky.slang), rebuilt every frame before tracing.
+    static constexpr uint32_t kSkyWidth = 192, kSkyHeight = 108;
+    static constexpr uint32_t kCloudWidth = 512, kCloudHeight = 256;
+    Image skyView_;
+    Image cloudView_;
+    VkPipeline cloudPipeline_ = VK_NULL_HANDLE;
+    bool skyViewNeedsInit_ = true;
+    VkSampler skySampler_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout skySetLayout_ = VK_NULL_HANDLE;
+    VkPipelineLayout skyPipelineLayout_ = VK_NULL_HANDLE;
+    VkPipeline skyPipeline_ = VK_NULL_HANDLE;
+    VkDescriptorPool skyPool_ = VK_NULL_HANDLE;
+    std::array<VkDescriptorSet, kFramesInFlight> skySets_{};
 
     Buffer sbt_;
     VkStridedDeviceAddressRegionKHR raygenRegion_{};

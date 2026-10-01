@@ -8,6 +8,7 @@
 //   0/1 solid primary/shadow, 2/3 cutout primary/shadow (alpha tested), 4/5 translucent primary/shadow.
 
 #include "frame.slang"
+#include "atmosphere.slang"
 
 static const uint RAY_PRIMARY = 0;
 static const uint RAY_SHADOW = 1;
@@ -72,6 +73,11 @@ static const uint MATERIAL_TINTED = 1;
 [[vk::binding(14, 0)]] Texture2DArray<float4> materialData;   // normal xy (OpenGL), roughness, ao
 [[vk::binding(15, 0)]] SamplerState materialSampler;
 [[vk::binding(16, 0)]] StructuredBuffer<MaterialParams> materialParams;
+[[vk::binding(17, 0)]] Texture2D<float4> skyViewLut;   // sky.slang
+[[vk::binding(18, 0)]] SamplerState skySampler;
+[[vk::binding(19, 0)]] Texture2D<float4> cloudViewLut; // sky.slang: rgb scattered, a transmittance
+
+static const uint WATER_MATERIAL = 255; // see SectionScanner.WATER_MATERIAL
 
 struct Payload
 {
@@ -84,6 +90,7 @@ struct Payload
     uint sectionSlot;
     float3 geometricNormal;  // for ray offsets; normal may be perturbed by a normal map
     float roughness;
+    uint materialId;
 };
 
 struct ShadowPayload
@@ -102,6 +109,7 @@ struct SurfaceSample
     float emission;
     float3 geometricNormal;
     float roughness;
+    uint materialId;
 };
 
 // Plains grass color: tinted materials are authored for it and shift with the biome tint.
@@ -120,6 +128,7 @@ struct MaterialSample
     float3 albedo;
     float3 normal;
     float roughness;
+    float height;            // 0..1
 };
 
 // Triplanar sampling for smoothed (non axis-aligned) terrain, with UDN normal blending.
@@ -140,12 +149,15 @@ MaterialSample sampleTriplanar(uint materialId, float3 pos, float3 n, float dist
     MaterialSample result;
     result.albedo = 0.0;
     result.roughness = 0.0;
+    result.height = 0.0;
     float3 blended = 0.0;
     if (weights.x > 0.01)
     {
         float3 uv = float3(coord.z, -coord.y, layer);
         float4 data = materialData.SampleLevel(materialSampler, uv, lod);
-        result.albedo += materialAlbedo.SampleLevel(materialSampler, uv, lod).rgb * weights.x;
+        float4 albedo = materialAlbedo.SampleLevel(materialSampler, uv, lod);
+        result.albedo += albedo.rgb * weights.x;
+        result.height += albedo.a * weights.x;
         result.roughness += data.z * weights.x;
         float3 t = float3(data.xy * 2.0 - 1.0 + n.zy, n.x);
         blended += t.zyx * weights.x;
@@ -154,7 +166,9 @@ MaterialSample sampleTriplanar(uint materialId, float3 pos, float3 n, float dist
     {
         float3 uv = float3(coord.x, -coord.z, layer);
         float4 data = materialData.SampleLevel(materialSampler, uv, lod);
-        result.albedo += materialAlbedo.SampleLevel(materialSampler, uv, lod).rgb * weights.y;
+        float4 albedo = materialAlbedo.SampleLevel(materialSampler, uv, lod);
+        result.albedo += albedo.rgb * weights.y;
+        result.height += albedo.a * weights.y;
         result.roughness += data.z * weights.y;
         float3 t = float3(data.xy * 2.0 - 1.0 + n.xz, n.y);
         blended += t.xzy * weights.y;
@@ -163,7 +177,9 @@ MaterialSample sampleTriplanar(uint materialId, float3 pos, float3 n, float dist
     {
         float3 uv = float3(coord.x, -coord.y, layer);
         float4 data = materialData.SampleLevel(materialSampler, uv, lod);
-        result.albedo += materialAlbedo.SampleLevel(materialSampler, uv, lod).rgb * weights.z;
+        float4 albedo = materialAlbedo.SampleLevel(materialSampler, uv, lod);
+        result.albedo += albedo.rgb * weights.z;
+        result.height += albedo.a * weights.z;
         result.roughness += data.z * weights.z;
         float3 t = float3(data.xy * 2.0 - 1.0 + n.xy, n.z);
         blended += t.xyz * weights.z;
@@ -171,6 +187,7 @@ MaterialSample sampleTriplanar(uint materialId, float3 pos, float3 n, float dist
     float total = (weights.x > 0.01 ? weights.x : 0.0) + (weights.y > 0.01 ? weights.y : 0.0) + (weights.z > 0.01 ? weights.z : 0.0);
     result.albedo /= total;
     result.roughness /= total;
+    result.height /= total;
     result.normal = normalize(blended);
     return result;
 }
@@ -194,13 +211,15 @@ void applySmoothMaterial(inout SurfaceSample s, uint word, float3 smoothNormal, 
     {
         MaterialSample top = sampleTriplanar(topId, inside, smoothNormal, distance);
         MaterialSample side = sampleTriplanar(sideId, inside, smoothNormal, distance);
-        // Height-free blend; a height-based blend comes with displacement.
-        m.albedo = lerp(side.albedo, top.albedo, topWeight);
-        m.roughness = lerp(side.roughness, top.roughness, topWeight);
-        m.normal = normalize(lerp(side.normal, top.normal, topWeight));
-        // Only the top (grass) is tinted; apply before mixing below via the weight.
         if ((materialParams[topId - 1].flags & MATERIAL_TINTED) != 0)
-            m.albedo = lerp(side.albedo, top.albedo * clamp(pow(tint, 2.2) / pow(REFERENCE_TINT, 2.2), 0.0, 2.0), topWeight);
+            top.albedo *= clamp(pow(tint, 2.2) / pow(REFERENCE_TINT, 2.2), 0.0, 2.0);
+        // Height blend: whichever material stands taller wins locally, so grass fills the gaps
+        // between stones instead of fading uniformly into dirt.
+        float blend = saturate((topWeight - 0.5) * 2.0 + (top.height - side.height) * 1.5);
+        blend = smoothstep(0.35, 0.65, lerp(topWeight, blend, 0.8));
+        m.albedo = lerp(side.albedo, top.albedo, blend);
+        m.roughness = lerp(side.roughness, top.roughness, blend);
+        m.normal = normalize(lerp(side.normal, top.normal, blend));
         s.albedo = m.albedo;
         s.normal = m.normal;
         s.roughness = clamp(m.roughness, 0.08, 1.0);
@@ -212,6 +231,48 @@ void applySmoothMaterial(inout SurfaceSample s, uint word, float3 smoothNormal, 
     s.albedo = m.albedo;
     s.normal = m.normal;
     s.roughness = clamp(m.roughness, 0.08, 1.0);
+}
+
+// Parallax occlusion mapping: march the view ray into the height map (albedo alpha; 1 = surface)
+// so close-up materials show depth. Fades out with distance, where it is invisible anyway.
+static const float PARALLAX_DEPTH = 0.06;   // blocks
+static const float PARALLAX_DISTANCE = 24.0; // blocks
+static const int PARALLAX_STEPS = 12;
+
+float2 parallaxOffset(float2 uv, float layer, float lod, float3 n, float3 tangent, float3 bitangent, float scale,
+                      float distance)
+{
+    float amplitude = PARALLAX_DEPTH * saturate(1.0 - distance / PARALLAX_DISTANCE);
+    if (amplitude <= 0.0)
+        return uv;
+    float3 v = -WorldRayDirection();
+    float vz = max(dot(v, n), 0.15);
+    // UV change per block of depth along the view ray (u follows the tangent, v runs against the bitangent).
+    float2 uvPerDepth = float2(-dot(v, tangent), dot(v, bitangent)) / (vz * scale);
+
+    float stepDepth = amplitude / float(PARALLAX_STEPS);
+    float depth = 0.0;
+    float prevDepth = 0.0;
+    float prevSurface = 0.0;
+    float2 current = uv;
+    for (int i = 0; i < PARALLAX_STEPS; ++i)
+    {
+        float surface = amplitude * (1.0 - materialAlbedo.SampleLevel(materialSampler, float3(current, layer), lod).a);
+        if (depth >= surface)
+        {
+            // Interpolate between the last two steps for a smooth intersection.
+            float before = prevSurface - prevDepth;
+            float after = depth - surface;
+            float t = before / max(before + after, 1e-5);
+            float hit = lerp(prevDepth, depth, t);
+            return uv + uvPerDepth * hit;
+        }
+        prevDepth = depth;
+        prevSurface = surface;
+        depth += stepDepth;
+        current = uv + uvPerDepth * depth;
+    }
+    return current;
 }
 
 // Blocks with a PBR material: world-space UVs so one texture spans `scale` blocks seamlessly,
@@ -255,9 +316,11 @@ void applyMaterial(inout SurfaceSample s, uint materialId, float3 tint)
     float cosView = max(abs(dot(n, WorldRayDirection())), 0.2);
     float footprint = distance * frame.params.y * params.textureSize / params.scale / cosView;
     float lod = log2(max(footprint, 1.0));
+    float layer = float(materialId - 1);
 
-    float4 albedo = materialAlbedo.SampleLevel(materialSampler, float3(uv, float(materialId - 1)), lod);
-    float4 data = materialData.SampleLevel(materialSampler, float3(uv, float(materialId - 1)), lod);
+    uv = parallaxOffset(uv, layer, lod, n, tangent, bitangent, params.scale, distance);
+    float4 albedo = materialAlbedo.SampleLevel(materialSampler, float3(uv, layer), lod);
+    float4 data = materialData.SampleLevel(materialSampler, float3(uv, layer), lod);
 
     s.albedo = albedo.rgb;
     if ((params.flags & MATERIAL_TINTED) != 0)
@@ -309,6 +372,7 @@ SurfaceSample fetchSurface(BuiltInTriangleIntersectionAttributes attribs, uint f
     s.normal = n;
     s.geometricNormal = n;
     s.roughness = 0.9;
+    s.materialId = 0;
     s.emission = float((v0.light >> 12) & 0xF) / 15.0;
     if ((v0.light & 1) != 0)
     {
@@ -323,7 +387,8 @@ SurfaceSample fetchSurface(BuiltInTriangleIntersectionAttributes attribs, uint f
         return s;
     }
     uint materialId = (v0.light >> 16) & 0xFF;
-    if (materialId != 0)
+    s.materialId = materialId;
+    if (materialId != 0 && materialId != WATER_MATERIAL)
         applyMaterial(s, materialId, tint.rgb);
     return s;
 }
@@ -339,6 +404,7 @@ void writePayload(inout Payload p, SurfaceSample s, uint translucent)
     p.sectionSlot = InstanceID();
     p.geometricNormal = s.geometricNormal;
     p.roughness = s.roughness;
+    p.materialId = s.materialId;
 }
 
 [shader("closesthit")]
@@ -410,45 +476,51 @@ float3 cosineSampleHemisphere(float3 n, inout uint seed)
 // Lighting. Functions named *Illumination return incoming light weighted for a Lambertian surface
 // with albedo 1 (pi folded into the light units); multiply by albedo for outgoing radiance.
 
-struct KeyLight
-{
-    float3 dir;
-    float3 radiance;         // irradiance on a surface facing the light
-};
-
-KeyLight keyLight()
-{
-    KeyLight light;
-    float sun = frame.sunDir.w;
-    float moon = frame.moonDir.w;
-    if (sun >= moon)
-    {
-        light.dir = frame.sunDir.xyz;
-        light.radiance = float3(1.0, 0.92, 0.80) * 3.0 * sun;
-    }
-    else
-    {
-        light.dir = frame.moonDir.xyz;
-        light.radiance = float3(0.55, 0.65, 1.0) * 0.12 * moon;
-    }
-    light.radiance *= 1.0 - 0.7 * frame.params.w; // rain
-    return light;
-}
+#include "clouds.slang"
 
 float3 skyRadiance(float3 d, bool includeSunDisk)
 {
-    float day = saturate(frame.sunDir.w);
-    float3 zenith = pow(max(frame.skyColor.rgb, 0.0), 2.2);
-    float3 horizon = lerp(zenith, float3(0.75, 0.80, 0.88) * max(day, 0.05), 0.65);
-    float3 color = d.y >= 0.0 ? lerp(horizon, zenith, pow(saturate(d.y), 0.45)) : horizon * 0.35;
+    // Below the horizon the model's planet surface is black; past render distance that reads as a
+    // hole, so continue the horizon haze downwards instead.
+    float3 lookup = d.y < 0.03 ? normalize(float3(d.x, 0.03, d.z)) : d;
+    float3 color = skyViewLut.SampleLevel(skySampler, skyViewUv(lookup), 0).rgb;
+    if (d.y < 0.0)
+        color *= lerp(1.0, 0.55, saturate(-d.y * 4.0));
+    if (includeSunDisk)
+    {
+        float sunAmount = dot(d, frame.sunDir.xyz);
+        if (sunAmount > 0.99989 && d.y > -0.01)
+            color += transmittanceToSpace(VIEWER, d) * 60.0 * saturate(frame.sunDir.w * 4.0);
+        // Moon disc (Minecraft's own sky pass is skipped), with a soft halo.
+        float moonAmount = dot(d, frame.moonDir.xyz);
+        if (frame.moonDir.y > -0.05)
+        {
+            if (moonAmount > 0.99985)
+                color += float3(0.85, 0.9, 1.0) * 6.0;
+            color += float3(0.55, 0.65, 0.9) * pow(saturate(moonAmount), 400.0) * 0.08;
+        }
+        // Stars, fading in as the sky darkens.
+        float night = saturate(1.0 - frame.sunDir.w * 3.0) * (1.0 - frame.params.w);
+        if (night > 0.0 && d.y > 0.0)
+        {
+            float3 cell = floor(d * 400.0);
+            float star = hash13(cell);
+            if (star > 0.9985)
+                color += float3(0.9, 0.95, 1.0) * (star - 0.9985) * 400.0 * night * saturate(d.y * 4.0);
+        }
+    }
+    return color;
+}
 
-    // Warm glow around the sun near the horizon.
-    float sunAmount = saturate(dot(d, frame.sunDir.xyz));
-    color += float3(1.0, 0.55, 0.25) * pow(sunAmount, 8.0) * 0.6 * day * (1.0 - saturate(frame.sunDir.y * 2.0));
 
-    if (includeSunDisk && sunAmount > 0.99989)
-        color += float3(1.0, 0.92, 0.80) * 60.0 * day;
-    return color * (1.0 - 0.5 * frame.params.w);
+// Sky seen through the volumetric cloud layer (from the cloud LUT, marched once per frame).
+float3 skyWithClouds(float3 origin, float3 dir, bool includeSunDisk)
+{
+    float3 sky = skyRadiance(dir, includeSunDisk);
+    if (dir.y < 0.01)
+        return sky;
+    float4 clouds = cloudViewLut.SampleLevel(skySampler, cloudViewUv(dir), 0);
+    return sky * clouds.a + clouds.rgb;
 }
 
 bool traceShadow(float3 origin, float3 dir, float maxT)
@@ -531,7 +603,7 @@ float3 directIllumination(float3 pos, float3 n, uint sectionSlot, KeyLight light
     float3 result = blockLightIllumination(pos, n, sectionSlot, seed);
     float ndotl = dot(n, light.dir);
     if (ndotl > 0.0 && any(light.radiance > 0.0) && traceShadow(pos + n * 0.004, light.dir, 1024.0))
-        result += light.radiance * ndotl;
+        result += light.radiance * ndotl * cloudShadow(pos, light.dir);
     return result;
 }
 
@@ -588,6 +660,31 @@ float3 surfaceIllumination(float3 pos, Payload hit, KeyLight light, inout uint s
     return lum > 64.0 ? illumination * (64.0 / lum) : illumination;
 }
 
+// Water: absorption and in-scattering per block of path, and an animated wave normal.
+static const float3 WATER_EXTINCTION = float3(0.30, 0.075, 0.05);
+static const float3 WATER_SCATTER = float3(0.010, 0.045, 0.060);
+
+float waveHeight(float2 p, float time)
+{
+    float h = 0.0;
+    h += sin(dot(p, float2(0.92, 0.38)) * 1.6 + time * 1.7) * 0.035;
+    h += sin(dot(p, float2(-0.45, 0.89)) * 2.3 + time * 2.1) * 0.025;
+    h += (valueNoise(float3(p * 1.7, time * 0.6)) - 0.5) * 0.05;
+    h += (valueNoise(float3(p * 4.1 + 13.0, time * 0.9)) - 0.5) * 0.02;
+    return h;
+}
+
+float3 waterNormal(float3 pos)
+{
+    float2 p = worldPosition(pos).xz;
+    float time = frame.params.x;
+    const float e = 0.05;
+    float h = waveHeight(p, time);
+    float dx = (waveHeight(p + float2(e, 0.0), time) - h) / e;
+    float dz = (waveHeight(p + float2(0.0, e), time) - h) / e;
+    return normalize(float3(-dx, 1.0, -dz));
+}
+
 float3 unproject(float2 ndc, float z)
 {
     float4 p = transformColumns(frame.invViewProj, float4(ndc, z, 1.0));
@@ -627,12 +724,24 @@ void rayGen()
     float depth = 0.0; // Minecraft clears depth to 0 (reverse Z)
 
     float tMin = 0.0;
+    bool inWater = false;
+    bool sawWater = false;
+    float3 waterAmbient = 0.0;
     for (uint layer = 0; layer < 4; ++layer)
     {
         Payload hit = tracePrimary(origin, dir, 0xFF, tMin);
+        if (inWater)
+        {
+            // Light lost and scattered along the underwater path to whatever comes next.
+            float pathLength = hit.hitT < 0.0 ? 64.0 : hit.hitT;
+            float3 absorption = exp(-WATER_EXTINCTION * pathLength);
+            foreground += throughput * WATER_SCATTER * waterAmbient * (1.0 - absorption);
+            throughput *= absorption;
+            inWater = false;
+        }
         if (hit.hitT < 0.0)
         {
-            foreground += throughput * skyRadiance(dir, true);
+            foreground += throughput * skyWithClouds(origin, dir, true);
             break;
         }
 
@@ -641,6 +750,44 @@ void rayGen()
         {
             foreground = debugMode == 1 ? hit.albedo : hit.normal * 0.5 + 0.5;
             break;
+        }
+
+        if (hit.translucent != 0 && hit.materialId == WATER_MATERIAL)
+        {
+            // Water: wave normal, Fresnel reflection, sun glint, then refract into the volume.
+            float3 n = hit.geometricNormal;
+            if (n.y > 0.5)
+                n = waterNormal(pos);
+            float cosIncident = saturate(dot(-dir, n));
+            float fresnel = 0.02 + 0.98 * pow(1.0 - cosIncident, 5.0);
+
+            float3 reflected = reflect(dir, n);
+            reflected.y = abs(reflected.y);
+            float3 reflectOrigin = pos + hit.geometricNormal * 0.01;
+            Payload r = tracePrimary(reflectOrigin, reflected, MASK_OPAQUE, 0.0);
+            float3 reflection;
+            if (r.hitT < 0.0)
+                reflection = skyWithClouds(reflectOrigin, reflected, false);
+            else
+            {
+                // Cheap shading: the reflection is dimmed by Fresnel and broken up by waves anyway.
+                reflection = r.albedo * (light.radiance * saturate(dot(r.normal, light.dir))
+                                         + skyRadiance(float3(0, 1, 0), false) * 0.6 + r.emission * EMISSIVE_SURFACE_RADIANCE);
+            }
+            float3 glint = keyLightSpecular(n, -dir, 0.06, light);
+            if (any(glint > 0.0) && traceShadow(reflectOrigin, light.dir, 1024.0))
+                reflection += glint * cloudShadow(pos, light.dir) / max(fresnel, 0.02);
+            foreground += throughput * fresnel * reflection;
+            throughput *= 1.0 - fresnel;
+
+            waterAmbient = skyRadiance(float3(0, 1, 0), false) + light.radiance * saturate(light.dir.y);
+            float3 refracted = refract(dir, n, 1.0 / 1.33);
+            dir = dot(refracted, refracted) > 0.0 ? normalize(refracted) : reflected;
+            origin = pos;
+            tMin = 0.001;
+            inWater = dir.y < 0.0;
+            sawWater = true;
+            continue;
         }
 
         if (hit.translucent != 0)
@@ -656,11 +803,14 @@ void rayGen()
         }
 
         foreground += throughput * hit.albedo * hit.emission * EMISSIVE_SURFACE_RADIANCE;
-        illumination = surfaceIllumination(pos, hit, light, seed);
+        // Seen through water, most of the light is absorbed: direct light is enough.
+        illumination = sawWater ? directIllumination(pos, hit.normal, hit.sectionSlot, light, seed)
+                                      + skyRadiance(float3(0, 1, 0), false) * 0.5
+                                : surfaceIllumination(pos, hit, light, seed);
         // Specular rides along in the demodulated buffer (divided by albedo here, multiplied back in compose).
         float3 specular = keyLightSpecular(hit.normal, -dir, hit.roughness, light);
         if (any(specular > 0.0) && traceShadow(pos + hit.geometricNormal * 0.004, light.dir, 1024.0))
-            illumination += specular / max(hit.albedo, 0.03);
+            illumination += specular * cloudShadow(pos, light.dir) / max(hit.albedo, 0.03);
         albedo = throughput * hit.albedo;
         float3 cameraRelative = pos - frame.cameraOffset.xyz;
         position = float4(pos, 1.0);

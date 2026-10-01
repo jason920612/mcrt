@@ -175,6 +175,7 @@ public final class RtRenderer {
 		// Angle one pixel subtends at the screen center; drives texture LOD selection.
 		Matrix4f projection = hasLevelProjection ? levelProjection : camera.projectionMatrix;
 		input.set(JAVA_FLOAT, NativeBridge.OFF_PIXEL_SPREAD, 2f / (color.getHeight(0) * Math.abs(projection.m11())));
+		input.set(JAVA_FLOAT, NativeBridge.OFF_CLOUD_HEIGHT, level.cloudHeight);
 
 		int result = bridge.renderFrame(ctx, input, output);
 		if (result < 0) {

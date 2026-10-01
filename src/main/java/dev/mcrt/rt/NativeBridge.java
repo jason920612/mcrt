@@ -48,6 +48,7 @@ final class NativeBridge {
 	static final long OFF_TIME = 272;
 	static final long OFF_RAIN = 276;
 	static final long OFF_PIXEL_SPREAD = 280;
+	static final long OFF_CLOUD_HEIGHT = 284;
 
 	static final long FRAME_OUTPUT_SIZE = 24;
 	static final long OFF_OUT_COMMAND_BUFFER = 0;

@@ -3,6 +3,7 @@
 	"package": "dev.mcrt.mixin",
 	"compatibilityLevel": "JAVA_21",
 	"client": [
+		"CloudRendererMixin",
 		"FrontendGpuDeviceAccessor",
 		"GameRendererMixin",
 		"LevelExtractorMixin",

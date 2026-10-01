@@ -12,7 +12,16 @@
 		"oak_bark":     { "source": "ambientcg:Bark012",         "scale": 1 },
 		"stone_bricks": { "source": "ambientcg:PavingStones128", "scale": 2 },
 		"bricks":       { "source": "ambientcg:Bricks097",       "scale": 1 },
-		"snow":         { "source": "ambientcg:Snow010A",        "scale": 2 }
+		"snow":         { "source": "ambientcg:Snow010A",        "scale": 2 },
+		"andesite":     { "source": "ambientcg:Rock030",         "scale": 2 },
+		"diorite":      { "source": "ambientcg:Rock026",         "scale": 2 },
+		"granite":      { "source": "ambientcg:Rock029",         "scale": 2 },
+		"tuff":         { "source": "ambientcg:Rock022",         "scale": 2 },
+		"calcite":      { "source": "ambientcg:Rock018",         "scale": 2 },
+		"clay":         { "source": "ambientcg:Rock041",         "scale": 2 },
+		"sandstone":    { "source": "ambientcg:Rock055",         "scale": 2 },
+		"terracotta":   { "source": "ambientcg:Rock061",         "scale": 2 },
+		"end_stone":    { "source": "ambientcg:Rock054",         "scale": 2 }
 	},
 	"blocks": {
 		"minecraft:stone":         { "all": "rock", "smooth": true },
@@ -31,6 +40,19 @@
 		"minecraft:bricks":        { "all": "bricks" },
 		"minecraft:snow_block":    { "all": "snow", "smooth": true },
 		"minecraft:snow":          { "all": "snow" },
-		"minecraft:powder_snow":   { "all": "snow" }
+		"minecraft:powder_snow":   { "all": "snow" },
+		"minecraft:andesite":      { "all": "andesite", "smooth": true },
+		"minecraft:diorite":       { "all": "diorite", "smooth": true },
+		"minecraft:granite":       { "all": "granite", "smooth": true },
+		"minecraft:tuff":          { "all": "tuff", "smooth": true },
+		"minecraft:calcite":       { "all": "calcite", "smooth": true },
+		"minecraft:clay":          { "all": "clay", "smooth": true },
+		"minecraft:sandstone":     { "all": "sandstone", "smooth": true },
+		"minecraft:terracotta":    { "all": "terracotta", "smooth": true },
+		"minecraft:end_stone":     { "all": "end_stone", "smooth": true },
+		"minecraft:podzol":        { "top": "dirt", "side": "dirt", "bottom": "dirt", "smooth": true },
+		"minecraft:mycelium":      { "top": "dirt", "side": "dirt", "bottom": "dirt", "smooth": true },
+		"minecraft:mud":           { "all": "dirt", "smooth": true },
+		"minecraft:red_sand":      { "all": "sand", "smooth": true }
 	}
 }

@@ -24,6 +24,9 @@ final class SectionScanner {
 	static final byte PIN = 4;     // see-through full block (ice, glass, leaves): faced like open, pins corners
 	// Snow layers up to this many fold into the surface below; deeper snow becomes a smooth snow block.
 	private static final int MAX_COVER_LAYERS = 3;
+	// Material id reserved for water surfaces (all faces); shaders render it as physical water.
+	static final int WATER_MATERIAL = 255;
+	private static final int WATER_FACES = WATER_MATERIAL | (WATER_MATERIAL << 8) | (WATER_MATERIAL << 16);
 	static final int PAD = 2;      // occupancy covers the section plus PAD blocks on every side
 	static final int BORDER = 16 + 2 * PAD;
 
@@ -53,12 +56,16 @@ final class SectionScanner {
 					BlockState state = region.getBlockState(pos.set(baseX + x, baseY + y, baseZ + z));
 					int local = (y << 8) | (z << 4) | x;
 					int faces = registry.faces(state.getBlock());
+					net.minecraft.world.level.material.Fluid fluid = state.getFluidState().getType();
+					if (fluid.isSame(net.minecraft.world.level.material.Fluids.WATER)) {
+						faces = WATER_FACES;
+					}
 					if (faces != 0) {
 						if (materials == null) {
 							materials = new int[4096];
 						}
 						materials[local] = faces;
-						anySmooth |= registry.isSmooth(state.getBlock()) || isDeepSnow(state);
+						anySmooth |= faces != WATER_FACES && (registry.isSmooth(state.getBlock()) || isDeepSnow(state));
 					}
 					int emission = state.getLightEmission();
 					if (emission > 0) {

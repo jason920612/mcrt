@@ -43,7 +43,10 @@ uint32_t packLightColor(uint32_t emission, uint32_t rgb565) {
 
 // Rewrites each vertex's light word (Minecraft's light map coordinates, which the path tracer has
 // no use for) as: bits 12-15 emission level of the quad's block, bits 16-23 its PBR material id.
-void annotateQuads(std::vector<uint8_t>& data, const uint8_t* emission, const uint32_t* blockMaterials) {
+constexpr uint32_t kWaterMaterial = 255; // see SectionScanner.WATER_MATERIAL
+
+void annotateQuads(std::vector<uint8_t>& data, const uint8_t* emission, const uint32_t* blockMaterials,
+                   bool translucentLayer) {
     const size_t quads = data.size() / (size_t(MCRT_VERTEX_STRIDE) * 4);
     for (size_t q = 0; q < quads; ++q) {
         uint8_t* quad = data.data() + q * MCRT_VERTEX_STRIDE * 4;
@@ -57,6 +60,9 @@ void annotateQuads(std::vector<uint8_t>& data, const uint8_t* emission, const ui
                 // Face role from the outward normal: top, bottom or side.
                 const uint32_t shift = normal[1] > 0.7f ? 0 : (normal[1] < -0.7f ? 16 : 8);
                 material = (blockMaterials[local] >> shift) & 0xFF;
+                // Only the fluid surface itself is water; plants growing in it keep their texture.
+                if (material == kWaterMaterial && !translucentLayer)
+                    material = 0;
             }
             word = (level << 12) | (material << 16);
         }
@@ -151,8 +157,8 @@ void SectionManager::enqueueUpdate(int32_t x, int32_t y, int32_t z, const void* 
         for (auto& layer : layers)
             terrain::removeReplacedQuads(layer, occupancy, tints.data());
     }
-    for (auto& layer : layers)
-        annotateQuads(layer, op.lights.empty() ? nullptr : emission, blockMaterials);
+    for (int i = 0; i < 3; ++i)
+        annotateQuads(layers[i], op.lights.empty() ? nullptr : emission, blockMaterials, i == 2);
     if (occupancy)
         terrain::appendSmoothTerrain(layers[0], occupancy, blockMaterials, tints.data());
 

@@ -1,6 +1,7 @@
 #include "renderer.h"
 
 #include "shaders/pathtrace.spv.h"
+#include "shaders/sky.spv.h"
 
 #include <algorithm>
 #include <cmath>
@@ -41,8 +42,9 @@ struct FrameUniforms {
     int32_t cameraBlock[4];
     float prevViewProj[16];
     float prevCameraShift[4];
+    float atmosphere[4];
 };
-static_assert(sizeof(FrameUniforms) == 320, "must match FrameUniforms in frame.slang");
+static_assert(sizeof(FrameUniforms) == 336, "must match FrameUniforms in frame.slang");
 
 void memoryBarrier(VkCommandBuffer cmd, VkPipelineStageFlags srcStage, VkAccessFlags srcAccess,
                    VkPipelineStageFlags dstStage, VkAccessFlags dstAccess) {
@@ -111,6 +113,127 @@ Renderer::Renderer(std::unique_ptr<VkContext> context) : ctx_(std::move(context)
     createDescriptors();
     createPipeline();
     createShaderBindingTable();
+    createSkyPass();
+}
+
+void Renderer::createSkyPass() {
+    VkDevice device = ctx_->device();
+    skyView_ = ctx_->createStorageImage(kSkyWidth, kSkyHeight, VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_SAMPLED_BIT);
+    cloudView_ = ctx_->createStorageImage(kCloudWidth, kCloudHeight, VK_FORMAT_R16G16B16A16_SFLOAT,
+                                          VK_IMAGE_USAGE_SAMPLED_BIT);
+
+    VkSamplerCreateInfo samplerInfo{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+    samplerInfo.magFilter = VK_FILTER_LINEAR;
+    samplerInfo.minFilter = VK_FILTER_LINEAR;
+    samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT; // azimuth wraps
+    samplerInfo.addressModeV = samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    MCRT_VK_CHECK(vkCreateSampler(device, &samplerInfo, nullptr, &skySampler_));
+
+    VkDescriptorSetLayoutBinding bindings[] = {
+        {0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},  // sky view
+        {1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        {2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},  // cloud view
+        {3, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},  // sky view, sampled
+        {4, VK_DESCRIPTOR_TYPE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+    };
+    VkDescriptorSetLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    layoutInfo.bindingCount = static_cast<uint32_t>(std::size(bindings));
+    layoutInfo.pBindings = bindings;
+    MCRT_VK_CHECK(vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &skySetLayout_));
+    VkDescriptorPoolSize poolSizes[] = {
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2 * kFramesInFlight},
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, kFramesInFlight},
+        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kFramesInFlight},
+        {VK_DESCRIPTOR_TYPE_SAMPLER, kFramesInFlight},
+    };
+    VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    poolInfo.maxSets = kFramesInFlight;
+    poolInfo.poolSizeCount = static_cast<uint32_t>(std::size(poolSizes));
+    poolInfo.pPoolSizes = poolSizes;
+    MCRT_VK_CHECK(vkCreateDescriptorPool(device, &poolInfo, nullptr, &skyPool_));
+    for (VkDescriptorSet& set : skySets_) {
+        VkDescriptorSetAllocateInfo allocInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        allocInfo.descriptorPool = skyPool_;
+        allocInfo.descriptorSetCount = 1;
+        allocInfo.pSetLayouts = &skySetLayout_;
+        MCRT_VK_CHECK(vkAllocateDescriptorSets(device, &allocInfo, &set));
+    }
+    VkPipelineLayoutCreateInfo pipelineLayoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    pipelineLayoutInfo.setLayoutCount = 1;
+    pipelineLayoutInfo.pSetLayouts = &skySetLayout_;
+    MCRT_VK_CHECK(vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &skyPipelineLayout_));
+
+    VkShaderModuleCreateInfo moduleInfo{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+    moduleInfo.codeSize = sizeof(kSpirv_sky);
+    moduleInfo.pCode = kSpirv_sky;
+    VkShaderModule module;
+    MCRT_VK_CHECK(vkCreateShaderModule(device, &moduleInfo, nullptr, &module));
+    auto create = [&](const char* entry, VkPipeline& out) {
+        VkComputePipelineCreateInfo info{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+        info.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        info.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        info.stage.module = module;
+        info.stage.pName = entry;
+        info.layout = skyPipelineLayout_;
+        return vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &info, nullptr, &out);
+    };
+    VkResult skyResult = create("skyViewLut", skyPipeline_);
+    VkResult cloudResult = create("cloudViewLut", cloudPipeline_);
+    vkDestroyShaderModule(device, module, nullptr);
+    MCRT_VK_CHECK(skyResult);
+    MCRT_VK_CHECK(cloudResult);
+}
+
+void Renderer::recordSkyPass(VkCommandBuffer cmd, FrameSlot& slot, uint32_t slotIndex) {
+    if (skyViewNeedsInit_) {
+        VkImageMemoryBarrier barriers[2]{};
+        VkImage images[2] = {skyView_.image, cloudView_.image};
+        for (int i = 0; i < 2; ++i) {
+            barriers[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            barriers[i].dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            barriers[i].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            barriers[i].newLayout = VK_IMAGE_LAYOUT_GENERAL;
+            barriers[i].srcQueueFamilyIndex = barriers[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barriers[i].image = images[i];
+            barriers[i].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        }
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0,
+                             nullptr, 0, nullptr, 2, barriers);
+        skyViewNeedsInit_ = false;
+    }
+    VkDescriptorImageInfo skyStorage{VK_NULL_HANDLE, skyView_.view, VK_IMAGE_LAYOUT_GENERAL};
+    VkDescriptorBufferInfo uniformInfo{slot.uniforms.buffer, 0, sizeof(FrameUniforms)};
+    VkDescriptorImageInfo cloudStorage{VK_NULL_HANDLE, cloudView_.view, VK_IMAGE_LAYOUT_GENERAL};
+    VkDescriptorImageInfo skySampled{VK_NULL_HANDLE, skyView_.view, VK_IMAGE_LAYOUT_GENERAL};
+    VkDescriptorImageInfo samplerInfo{skySampler_, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED};
+    VkWriteDescriptorSet writes[5]{};
+    const VkDescriptorType types[5] = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                                       VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+                                       VK_DESCRIPTOR_TYPE_SAMPLER};
+    for (uint32_t i = 0; i < 5; ++i) {
+        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].dstSet = skySets_[slotIndex];
+        writes[i].dstBinding = i;
+        writes[i].descriptorCount = 1;
+        writes[i].descriptorType = types[i];
+    }
+    writes[0].pImageInfo = &skyStorage;
+    writes[1].pBufferInfo = &uniformInfo;
+    writes[2].pImageInfo = &cloudStorage;
+    writes[3].pImageInfo = &skySampled;
+    writes[4].pImageInfo = &samplerInfo;
+    vkUpdateDescriptorSets(ctx_->device(), 5, writes, 0, nullptr);
+
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, skyPipelineLayout_, 0, 1, &skySets_[slotIndex], 0,
+                            nullptr);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, skyPipeline_);
+    vkCmdDispatch(cmd, (kSkyWidth + 7) / 8, (kSkyHeight + 7) / 8, 1);
+    memoryBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cloudPipeline_);
+    vkCmdDispatch(cmd, (kCloudWidth + 7) / 8, (kCloudHeight + 7) / 8, 1);
+    memoryBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+                  VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, VK_ACCESS_SHADER_READ_BIT);
 }
 
 Renderer::~Renderer() {
@@ -126,6 +249,14 @@ Renderer::~Renderer() {
     ctx_->destroyBuffer(tlasScratch_);
     denoiser_.reset();
     materials_.reset();
+    ctx_->destroyImage(skyView_);
+    ctx_->destroyImage(cloudView_);
+    vkDestroyPipeline(device, cloudPipeline_, nullptr);
+    vkDestroySampler(device, skySampler_, nullptr);
+    vkDestroyPipeline(device, skyPipeline_, nullptr);
+    vkDestroyPipelineLayout(device, skyPipelineLayout_, nullptr);
+    vkDestroyDescriptorPool(device, skyPool_, nullptr);
+    vkDestroyDescriptorSetLayout(device, skySetLayout_, nullptr);
     ctx_->destroyBuffer(depth_);
     if (atlasView_)
         vkDestroyImageView(device, atlasView_, nullptr);
@@ -166,6 +297,9 @@ void Renderer::createDescriptors() {
         {14, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, hits, nullptr},  // material data array
         {15, VK_DESCRIPTOR_TYPE_SAMPLER, 1, hits, nullptr},
         {16, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, hits, nullptr}, // material params
+        {17, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, rgen | hits, nullptr}, // sky-view LUT
+        {18, VK_DESCRIPTOR_TYPE_SAMPLER, 1, rgen | hits, nullptr},
+        {19, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, rgen | hits, nullptr}, // cloud LUT
     };
     VkDescriptorSetLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     layoutInfo.bindingCount = static_cast<uint32_t>(std::size(bindings));
@@ -177,8 +311,8 @@ void Renderer::createDescriptors() {
         {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 5 * kFramesInFlight},
         {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 5 * kFramesInFlight},
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, kFramesInFlight},
-        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 3 * kFramesInFlight},
-        {VK_DESCRIPTOR_TYPE_SAMPLER, 2 * kFramesInFlight},
+        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 5 * kFramesInFlight},
+        {VK_DESCRIPTOR_TYPE_SAMPLER, 3 * kFramesInFlight},
     };
     VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     poolInfo.maxSets = kFramesInFlight;
@@ -431,7 +565,12 @@ void Renderer::updateDescriptors(FrameSlot& slot) {
     VkDescriptorImageInfo materialSamplerInfo{materials_->sampler(), VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED};
     VkDescriptorBufferInfo materialParamsInfo{materials_->params().buffer, 0, VK_WHOLE_SIZE};
 
-    VkWriteDescriptorSet writes[17]{};
+    VkDescriptorImageInfo skyViewInfo{VK_NULL_HANDLE, skyView_.view, VK_IMAGE_LAYOUT_GENERAL};
+    VkDescriptorImageInfo skySamplerInfo{skySampler_, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED};
+
+    VkDescriptorImageInfo cloudViewInfo{VK_NULL_HANDLE, cloudView_.view, VK_IMAGE_LAYOUT_GENERAL};
+
+    VkWriteDescriptorSet writes[20]{};
     auto write = [&](uint32_t binding, VkDescriptorType type) -> VkWriteDescriptorSet& {
         VkWriteDescriptorSet& w = writes[binding];
         w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -458,7 +597,10 @@ void Renderer::updateDescriptors(FrameSlot& slot) {
     write(14, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE).pImageInfo = &materialDataInfo;
     write(15, VK_DESCRIPTOR_TYPE_SAMPLER).pImageInfo = &materialSamplerInfo;
     write(16, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).pBufferInfo = &materialParamsInfo;
-    vkUpdateDescriptorSets(ctx_->device(), 17, writes, 0, nullptr);
+    write(17, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE).pImageInfo = &skyViewInfo;
+    write(18, VK_DESCRIPTOR_TYPE_SAMPLER).pImageInfo = &skySamplerInfo;
+    write(19, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE).pImageInfo = &cloudViewInfo;
+    vkUpdateDescriptorSets(ctx_->device(), 20, writes, 0, nullptr);
 }
 
 McrtStats Renderer::stats() const {
@@ -547,6 +689,7 @@ bool Renderer::renderFrame(const McrtFrameInput& input, McrtFrameOutput& output)
     std::memcpy(uniforms.skyColor, input.sky_color, sizeof(uniforms.skyColor));
     uniforms.params[0] = input.time_seconds;
     uniforms.params[1] = input.pixel_spread;
+    uniforms.atmosphere[0] = input.cloud_height;
     uniforms.params[2] = static_cast<float>(input.debug_mode);
     uniforms.params[3] = input.rain;
     uniforms.frameInfo[0] = input.frame_index;
@@ -569,6 +712,7 @@ bool Renderer::renderFrame(const McrtFrameInput& input, McrtFrameOutput& output)
     std::memcpy(prevCameraOffset_, input.camera_offset, sizeof(prevCameraOffset_));
     ctx_->writeBuffer(slot.uniforms, &uniforms, sizeof(uniforms));
     updateDescriptors(slot);
+    recordSkyPass(cmd, slot, slotIndex);
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, pipeline_);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, pipelineLayout_, 0, 1, &slot.descriptorSet,
