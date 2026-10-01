@@ -3,6 +3,7 @@
 #include "mcrt/api.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 namespace mcrt {
@@ -30,6 +31,60 @@ VkAccelerationStructureGeometryKHR triangleGeometry(VkDeviceAddress vertices, ui
     return geometry;
 }
 
+constexpr uint32_t kLightRebuildInterval = 8; // frames
+
+uint32_t packLightColor(uint32_t emission, uint32_t rgb565) {
+    uint32_t r = ((rgb565 >> 11) & 31) * 255 / 31;
+    uint32_t g = ((rgb565 >> 5) & 63) * 255 / 63;
+    uint32_t b = (rgb565 & 31) * 255 / 31;
+    return (emission & 0xF) | (r << 8) | (g << 16) | (b << 24);
+}
+
+// Rewrites each vertex's light word (Minecraft's light map coordinates, which the path tracer has
+// no use for) as: bits 12-15 emission level of the quad's block, bits 16-23 its PBR material id.
+void annotateQuads(std::vector<uint8_t>& data, const uint8_t* emission, const uint32_t* blockMaterials) {
+    const size_t quads = data.size() / (size_t(MCRT_VERTEX_STRIDE) * 4);
+    for (size_t q = 0; q < quads; ++q) {
+        uint8_t* quad = data.data() + q * MCRT_VERTEX_STRIDE * 4;
+        float p[4][3];
+        for (int v = 0; v < 4; ++v)
+            std::memcpy(p[v], quad + v * MCRT_VERTEX_STRIDE, sizeof(p[v]));
+        float e1[3], e2[3], n[3], c[3];
+        for (int i = 0; i < 3; ++i) {
+            e1[i] = p[1][i] - p[0][i];
+            e2[i] = p[2][i] - p[0][i];
+            c[i] = (p[0][i] + p[1][i] + p[2][i] + p[3][i]) * 0.25f;
+        }
+        n[0] = e1[1] * e2[2] - e1[2] * e2[1];
+        n[1] = e1[2] * e2[0] - e1[0] * e2[2];
+        n[2] = e1[0] * e2[1] - e1[1] * e2[0];
+        float len = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+        const uint32_t cleared = 0;
+        for (int v = 0; v < 4; ++v)
+            std::memcpy(quad + v * MCRT_VERTEX_STRIDE + 24, &cleared, sizeof(cleared));
+        if (len < 1e-8f)
+            continue;
+        // Minecraft quads wind counter-clockwise seen from outside, so -n points into the block.
+        int b[3];
+        for (int i = 0; i < 3; ++i)
+            b[i] = static_cast<int>(std::floor(c[i] - n[i] / len * 0.02f));
+        if (b[0] < 0 || b[0] > 15 || b[1] < 0 || b[1] > 15 || b[2] < 0 || b[2] > 15)
+            continue;
+        const uint32_t local = (b[1] << 8) | (b[2] << 4) | b[0];
+        const uint32_t level = emission ? emission[local] : 0;
+        uint32_t material = 0;
+        if (blockMaterials) {
+            // Face role from the outward normal: top, bottom or side.
+            const float ny = n[1] / len;
+            const uint32_t shift = ny > 0.7f ? 0 : (ny < -0.7f ? 16 : 8);
+            material = (blockMaterials[local] >> shift) & 0xFF;
+        }
+        const uint32_t word = (level << 12) | (material << 16);
+        for (int v = 0; v < 4; ++v)
+            std::memcpy(quad + v * MCRT_VERTEX_STRIDE + 24, &word, sizeof(word));
+    }
+}
+
 void destroyAccelerationStructure(VkContext& ctx, AccelerationStructure& as) {
     if (as.handle)
         vkDestroyAccelerationStructureKHR(ctx.device(), as.handle, nullptr);
@@ -44,6 +99,7 @@ SectionManager::SectionManager(VkContext& ctx, DeletionQueue& deletion) : ctx_(c
     infoBuffer_ = ctx_.createBuffer(infoCapacity_ * sizeof(SectionInfoGpu), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                                     MemoryKind::HostUpload);
     ensureQuadIndices(kInitialQuadCapacity, 0);
+    rebuildLights(0);
 }
 
 SectionManager::~SectionManager() {
@@ -63,6 +119,8 @@ void SectionManager::destroyAll() {
     ctx_.destroyBuffer(scratch_);
     ctx_.destroyBuffer(quadIndices_);
     ctx_.destroyBuffer(infoBuffer_);
+    ctx_.destroyBuffer(lightRanges_);
+    ctx_.destroyBuffer(lightList_);
 }
 
 uint64_t SectionManager::key(int32_t x, int32_t y, int32_t z) {
@@ -73,7 +131,8 @@ uint64_t SectionManager::key(int32_t x, int32_t y, int32_t z) {
 
 void SectionManager::enqueueUpdate(int32_t x, int32_t y, int32_t z, const void* solid, uint32_t solidVertices,
                                    const void* cutout, uint32_t cutoutVertices, const void* translucent,
-                                   uint32_t translucentVertices) {
+                                   uint32_t translucentVertices, const uint32_t* lights, uint32_t lightCount,
+                                   const uint32_t* blockMaterials) {
     // Only whole quads are meaningful.
     solidVertices &= ~3u;
     cutoutVertices &= ~3u;
@@ -98,6 +157,20 @@ void SectionManager::enqueueUpdate(int32_t x, int32_t y, int32_t z, const void* 
     append(solid, op.solidVertices);
     append(cutout, op.cutoutVertices);
     append(translucent, op.translucentVertices);
+
+    uint8_t emission[4096] = {};
+    if (lights && lightCount > 0) {
+        op.lights.reserve(lightCount);
+        for (uint32_t i = 0; i < lightCount; ++i) {
+            const uint32_t packed = lights[i];
+            const uint32_t local = packed & 0xFFF;
+            const uint32_t level = (packed >> 12) & 0xF;
+            emission[local] = static_cast<uint8_t>(level);
+            op.lights.push_back({x * 16 + int32_t(local & 15), y * 16 + int32_t(local >> 8),
+                                 z * 16 + int32_t((local >> 4) & 15), packLightColor(level, packed >> 16)});
+        }
+    }
+    annotateQuads(op.data, op.lights.empty() ? nullptr : emission, blockMaterials);
 
     std::lock_guard lock(incomingMutex_);
     incoming_.push_back(std::move(op));
@@ -268,6 +341,7 @@ bool SectionManager::recordUpdates(VkCommandBuffer cmd, uint32_t slot, uint64_t 
         job.section.x = op.x;
         job.section.y = op.y;
         job.section.z = op.z;
+        job.section.lights = op.lights;
         jobs.push_back(job);
         stagingTotal += alignUp(bytes, 16);
     }
@@ -399,7 +473,63 @@ bool SectionManager::recordUpdates(VkCommandBuffer cmd, uint32_t slot, uint64_t 
 
     for (uint64_t k : processed)
         pending_.erase(k);
+
+    lightsDirty_ |= changed;
+    ++framesSinceLightRebuild_;
+    // Residency changes must reach the light table, but rebuilding it every frame while chunks
+    // stream in is wasted work; a grown slot table, however, must be covered immediately.
+    if (lightsDirty_ && (framesSinceLightRebuild_ >= kLightRebuildInterval || lightRangesCapacity_ < infoCapacity_))
+        rebuildLights(retireValue);
     return changed;
+}
+
+void SectionManager::rebuildLights(uint64_t retireValue) {
+    // Gather each light-owning section's lights into every resident neighbor (3x3x3 sections):
+    // block light reaches 15 blocks, so that neighborhood covers every light that matters.
+    std::unordered_map<uint32_t, std::vector<GpuLight>> perSlot;
+    totalLights_ = 0;
+    for (const auto& [k, owner] : resident_) {
+        if (owner.lights.empty())
+            continue;
+        totalLights_ += owner.lights.size();
+        for (int dx = -1; dx <= 1; ++dx)
+            for (int dy = -1; dy <= 1; ++dy)
+                for (int dz = -1; dz <= 1; ++dz) {
+                    auto it = resident_.find(key(owner.x + dx, owner.y + dy, owner.z + dz));
+                    if (it == resident_.end())
+                        continue;
+                    auto& list = perSlot[it->second.slot];
+                    list.insert(list.end(), owner.lights.begin(), owner.lights.end());
+                }
+    }
+
+    std::vector<uint32_t> ranges(size_t(infoCapacity_) * 2, 0);
+    std::vector<GpuLight> list;
+    for (auto& [slot, lights] : perSlot) {
+        ranges[size_t(slot) * 2] = static_cast<uint32_t>(list.size());
+        ranges[size_t(slot) * 2 + 1] = static_cast<uint32_t>(lights.size());
+        list.insert(list.end(), lights.begin(), lights.end());
+    }
+    if (list.empty())
+        list.push_back({});
+
+    Buffer newRanges = ctx_.createBuffer(ranges.size() * sizeof(uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                         MemoryKind::HostUpload);
+    ctx_.writeBuffer(newRanges, ranges.data(), newRanges.size);
+    Buffer newList = ctx_.createBuffer(list.size() * sizeof(GpuLight), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                       MemoryKind::HostUpload);
+    ctx_.writeBuffer(newList, list.data(), newList.size);
+
+    Buffer oldRanges = lightRanges_, oldList = lightList_;
+    deletion_.push(retireValue, [this, oldRanges, oldList]() mutable {
+        ctx_.destroyBuffer(oldRanges);
+        ctx_.destroyBuffer(oldList);
+    });
+    lightRanges_ = newRanges;
+    lightList_ = newList;
+    lightRangesCapacity_ = infoCapacity_;
+    lightsDirty_ = false;
+    framesSinceLightRebuild_ = 0;
 }
 
 void SectionManager::appendInstances(std::vector<VkAccelerationStructureInstanceKHR>& out,

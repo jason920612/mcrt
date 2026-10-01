@@ -44,7 +44,8 @@ typedef struct McrtFrameInput {
     float sky_color[4];          // Minecraft's sky color
     float time_seconds;
     float rain;
-    uint32_t reserved[2];
+    float pixel_spread;          // angle one pixel subtends at the screen center (radians)
+    uint32_t reserved;
 } McrtFrameInput;
 
 typedef struct McrtFrameOutput {
@@ -57,9 +58,10 @@ typedef struct McrtStats {
     uint32_t resident_sections;
     uint32_t pending_sections;
     uint32_t tlas_instances;
-    uint32_t accumulated_frames;
+    uint32_t reserved0;
     float gpu_frame_ms;          // GPU time of our pass, a few frames old
-    uint32_t reserved[3];
+    uint32_t lights;             // emissive blocks across resident sections
+    uint32_t reserved[2];
 } McrtStats;
 
 // Returns null on failure; see mcrt_last_error().
@@ -70,10 +72,20 @@ MCRT_API McrtContext* mcrt_create(uint64_t get_instance_proc_addr, uint64_t inst
 MCRT_API int32_t mcrt_render_frame(McrtContext* ctx, const McrtFrameInput* input, McrtFrameOutput* output);
 
 // Thread-safe. Copies the vertex data (MCRT_VERTEX_STRIDE bytes per vertex, quads) before returning.
+// Each light packs: bits 0-11 local block index ((y << 8) | (z << 4) | x), bits 12-15 emission,
+// bits 16-31 RGB565 color. block_materials is null or 4096 entries (same indexing), each packing
+// material ids for the top (bits 0-7), side (8-15) and bottom (16-23) faces; 0 = Minecraft texture.
 MCRT_API void mcrt_section_update(McrtContext* ctx, int32_t section_x, int32_t section_y, int32_t section_z,
                                   const void* solid, uint32_t solid_vertices,
                                   const void* cutout, uint32_t cutout_vertices,
-                                  const void* translucent, uint32_t translucent_vertices);
+                                  const void* translucent, uint32_t translucent_vertices,
+                                  const uint32_t* lights, uint32_t light_count,
+                                  const uint32_t* block_materials);
+
+// Thread-safe. Uploads material `index` (0-based; shaders see id index + 1) of `count`, as two
+// RGBA8 size x size images: albedo (rgb, a = height) and data (normal xy, roughness, ao).
+MCRT_API void mcrt_material_upload(McrtContext* ctx, uint32_t index, uint32_t count, uint32_t size, uint32_t scale,
+                                   uint32_t flags, uint64_t albedo_rgba, uint64_t data_rgba);
 
 // Thread-safe.
 MCRT_API void mcrt_section_remove(McrtContext* ctx, int32_t section_x, int32_t section_y, int32_t section_z);
@@ -104,6 +116,7 @@ static_assert(offsetof(McrtFrameInput, moon_dir) == 240);
 static_assert(offsetof(McrtFrameInput, sky_color) == 256);
 static_assert(offsetof(McrtFrameInput, time_seconds) == 272);
 static_assert(offsetof(McrtFrameInput, rain) == 276);
+static_assert(offsetof(McrtFrameInput, pixel_spread) == 280);
 static_assert(sizeof(McrtFrameInput) == 288);
 static_assert(sizeof(McrtFrameOutput) == 24);
 static_assert(sizeof(McrtStats) == 32);

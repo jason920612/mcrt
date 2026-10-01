@@ -21,6 +21,7 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.ModifyArg;
 import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
@@ -80,6 +81,16 @@ public abstract class LevelRendererMixin {
 		if (!RtRenderer.get().isActive()) {
 			sections.renderOit(sampler, stage, parameters, atlas, lightmap);
 		}
+	}
+
+	/** The path tracer computes occlusion itself; Minecraft's baked AO would darken corners twice. */
+	@ModifyArg(
+		method = "invalidateCompiledGeometry",
+		at = @At(value = "INVOKE", target = "Lnet/minecraft/client/renderer/chunk/SectionCompiler;<init>(ZZLnet/minecraft/client/renderer/block/BlockStateModelSet;Lnet/minecraft/client/renderer/block/FluidStateModelSet;Lnet/minecraft/client/color/block/BlockColors;)V"),
+		index = 0
+	)
+	private boolean mcrt$noBakedAmbientOcclusion(boolean ambientOcclusion) {
+		return ambientOcclusion && !RtRenderer.get().isActive();
 	}
 
 	@Inject(method = "invalidateCompiledGeometry", at = @At("HEAD"))

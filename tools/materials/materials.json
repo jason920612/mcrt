@@ -1,0 +1,36 @@
+{
+	"_comment": "Material sources (all CC0 from ambientCG) and which Minecraft block faces use them. scale = blocks covered by one texture repeat. tinted = multiplied by the biome tint (normalized to plains grass).",
+	"materials": {
+		"rock":         { "source": "ambientcg:Rock032",         "scale": 2 },
+		"deepslate":    { "source": "ambientcg:Rock031",         "scale": 2 },
+		"grass":        { "source": "ambientcg:Grass004",        "scale": 2, "tinted": true },
+		"dirt":         { "source": "ambientcg:Ground103",       "scale": 2 },
+		"sand":         { "source": "ambientcg:Ground080",       "scale": 2 },
+		"gravel":       { "source": "ambientcg:Gravel043",       "scale": 2 },
+		"cobblestone":  { "source": "ambientcg:PavingStones142", "scale": 2 },
+		"oak_planks":   { "source": "ambientcg:WoodFloor043",    "scale": 1 },
+		"oak_bark":     { "source": "ambientcg:Bark012",         "scale": 1 },
+		"stone_bricks": { "source": "ambientcg:PavingStones128", "scale": 2 },
+		"bricks":       { "source": "ambientcg:Bricks097",       "scale": 1 },
+		"snow":         { "source": "ambientcg:Snow010A",        "scale": 2 }
+	},
+	"blocks": {
+		"minecraft:stone":         { "all": "rock" },
+		"minecraft:deepslate":     { "all": "deepslate" },
+		"minecraft:grass_block":   { "top": "grass", "side": "dirt", "bottom": "dirt" },
+		"minecraft:dirt":          { "all": "dirt" },
+		"minecraft:coarse_dirt":   { "all": "dirt" },
+		"minecraft:rooted_dirt":   { "all": "dirt" },
+		"minecraft:sand":          { "all": "sand" },
+		"minecraft:gravel":        { "all": "gravel" },
+		"minecraft:cobblestone":   { "all": "cobblestone" },
+		"minecraft:oak_planks":    { "all": "oak_planks" },
+		"minecraft:oak_log":       { "side": "oak_bark" },
+		"minecraft:oak_wood":      { "all": "oak_bark" },
+		"minecraft:stone_bricks":  { "all": "stone_bricks" },
+		"minecraft:bricks":        { "all": "bricks" },
+		"minecraft:snow_block":    { "all": "snow" },
+		"minecraft:snow":          { "all": "snow" },
+		"minecraft:powder_snow":   { "all": "snow" }
+	}
+}

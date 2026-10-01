@@ -29,7 +29,7 @@ find_program(SLANGC slangc HINTS ${CMAKE_CURRENT_SOURCE_DIR}/../tools/slang/bin 
 set(GEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)
 file(MAKE_DIRECTORY ${GEN_DIR}/shaders)
 
-set(SHADERS pathtrace)
+set(SHADERS pathtrace denoise)
 set(SHADER_HEADERS)
 foreach(name IN LISTS SHADERS)
     set(spv ${GEN_DIR}/shaders/${name}.spv)
@@ -51,6 +51,8 @@ add_custom_target(mcrt_shaders DEPENDS ${SHADER_HEADERS})
 # ---- Native library ---------------------------------------------------------------------
 add_library(mcrt_native SHARED
     src/api.cpp
+    src/denoiser.cpp
+    src/material_store.cpp
     src/renderer.cpp
     src/section_manager.cpp
     src/vk_context.cpp

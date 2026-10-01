@@ -43,8 +43,21 @@ tasks.register('buildNative', Exec) {
 
 sourceSets.main.resources.srcDir(nativeOutDir)
 
+// ---- CC0 PBR materials (downloaded and packed by tools/materials; not committed) ------------
+def materialsOutDir = layout.buildDirectory.dir("generated/materials").get().asFile
+
+tasks.register('buildMaterials', Exec) {
+	inputs.file("tools/materials/materials.json")
+	inputs.file("tools/materials/build_materials.py")
+	outputs.dir(materialsOutDir)
+	commandLine 'python', 'tools/materials/build_materials.py', new File(materialsOutDir, "assets/mcrt/materials").absolutePath
+}
+
+sourceSets.main.resources.srcDir(materialsOutDir)
+
 processResources {
 	dependsOn 'buildNative'
+	dependsOn 'buildMaterials'
 	def version = project.version
 	inputs.property "version", version
 	filesMatching("fabric.mod.json") {
@@ -71,6 +84,13 @@ loom {
 			// ./gradlew runClient -PmcrtDevTime=6000 pins singleplayer time of day (noon)
 			if (project.hasProperty('mcrtDevTime')) {
 				vmArgs "-Dmcrt.devTime=${project.property('mcrtDevTime')}"
+			}
+			// -PmcrtDevCommands="setblock ~ ~ ~3 glowstone;..." runs server commands once after joining
+			if (project.hasProperty('mcrtDevSpin')) {
+				vmArgs "-Dmcrt.devSpin=${project.property('mcrtDevSpin')}"
+			}
+			if (project.hasProperty('mcrtDevCommands')) {
+				vmArgs "-Dmcrt.devCommands=${project.property('mcrtDevCommands')}"
 			}
 		}
 	}

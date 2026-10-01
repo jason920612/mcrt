@@ -20,7 +20,7 @@ public abstract class SectionCompileTaskMixin {
 	private SectionCompiler.Results mcrt$captureCompiled(SectionCompiler compiler, SectionPos pos, RenderSectionRegion region,
 			VertexSorting sorting, SectionBufferBuilderPack buffers) {
 		SectionCompiler.Results results = compiler.compile(pos, region, sorting, buffers);
-		SectionCapture.onCompiled(pos, results);
+		SectionCapture.onCompiled(pos, region, results);
 		return results;
 	}
 }

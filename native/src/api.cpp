@@ -48,12 +48,25 @@ MCRT_API int32_t mcrt_render_frame(McrtContext* ctx, const McrtFrameInput* input
 
 MCRT_API void mcrt_section_update(McrtContext* ctx, int32_t section_x, int32_t section_y, int32_t section_z,
                                   const void* solid, uint32_t solid_vertices, const void* cutout,
-                                  uint32_t cutout_vertices, const void* translucent, uint32_t translucent_vertices) {
+                                  uint32_t cutout_vertices, const void* translucent, uint32_t translucent_vertices,
+                                  const uint32_t* lights, uint32_t light_count, const uint32_t* block_materials) {
     try {
         ctx->renderer->sections().enqueueUpdate(section_x, section_y, section_z, solid, solid_vertices, cutout,
-                                                cutout_vertices, translucent, translucent_vertices);
+                                                cutout_vertices, translucent, translucent_vertices, lights,
+                                                light_count, block_materials);
     } catch (const std::exception& e) {
         setError("mcrt_section_update", e);
+    }
+}
+
+MCRT_API void mcrt_material_upload(McrtContext* ctx, uint32_t index, uint32_t count, uint32_t size, uint32_t scale,
+                                   uint32_t flags, uint64_t albedo_rgba, uint64_t data_rgba) {
+    try {
+        ctx->renderer->materials().upload(index, count, size, scale, flags,
+                                          reinterpret_cast<const void*>(albedo_rgba),
+                                          reinterpret_cast<const void*>(data_rgba));
+    } catch (const std::exception& e) {
+        setError("mcrt_material_upload", e);
     }
 }
 

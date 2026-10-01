@@ -1,6 +1,8 @@
 #pragma once
 
 #include "deletion_queue.h"
+#include "denoiser.h"
+#include "material_store.h"
 #include "mcrt/api.h"
 #include "section_manager.h"
 #include "vk_context.h"
@@ -19,6 +21,7 @@ public:
     Renderer& operator=(const Renderer&) = delete;
 
     SectionManager& sections() { return *sections_; }
+    MaterialStore& materials() { return *materials_; }
     McrtStats stats() const;
 
     // Records this frame's work. Returns false when there is nothing to do.
@@ -44,12 +47,13 @@ private:
     void ensureTlas(uint32_t instanceCount, uint64_t retireValue);
     void recordTlasBuild(VkCommandBuffer cmd, FrameSlot& slot, const McrtFrameInput& input, uint64_t retireValue);
     void updateDescriptors(FrameSlot& slot);
-    bool updateAccumulation(const McrtFrameInput& input, bool geometryChanged, bool targetsChanged);
+
     void waitForValue(uint64_t value);
 
     std::unique_ptr<VkContext> ctx_;
     DeletionQueue deletion_;
     std::unique_ptr<SectionManager> sections_;
+    std::unique_ptr<MaterialStore> materials_;
 
     VkCommandPool commandPool_ = VK_NULL_HANDLE;
     std::array<FrameSlot, kFramesInFlight> slots_{};
@@ -76,21 +80,19 @@ private:
     std::vector<VkAccelerationStructureInstanceKHR> instanceScratch_;
     uint32_t tlasInstanceCount_ = 0;
 
-    // Render targets (our side; copied into Minecraft's main target every frame).
-    Image output_;       // RGBA8, tonemapped
-    Image accumulation_; // RGBA32F, linear radiance history
-    Buffer depth_;       // float per pixel, copied into the D32 depth target
-    bool targetsNeedInit_ = false;
+    std::unique_ptr<Denoiser> denoiser_; // owns the G-buffer and the final image
+    Buffer depth_;                       // float per pixel, copied into the D32 depth target
+    uint32_t depthWidth_ = 0, depthHeight_ = 0;
+    uint32_t historyIndex_ = 0;          // which denoiser history buffer is current
 
     VkImage atlasImage_ = VK_NULL_HANDLE;
     VkImageView atlasView_ = VK_NULL_HANDLE;
 
-    // Progressive accumulation while the view is static.
-    uint32_t accumulatedFrames_ = 0;
-    float lastViewProj_[16] = {};
-    int32_t lastCameraBlock_[3] = {};
-    float lastCameraOffset_[3] = {};
-    float lastSunDir_[3] = {};
+    // Previous frame's camera, for temporal reprojection.
+    bool hasPrevious_ = false;
+    float prevViewProj_[16] = {};
+    int32_t prevCameraBlock_[3] = {};
+    float prevCameraOffset_[3] = {};
 };
 
 } // namespace mcrt

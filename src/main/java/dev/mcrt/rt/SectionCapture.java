@@ -4,6 +4,7 @@ import com.mojang.blaze3d.vertex.MeshData;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import java.util.Map;
 import net.minecraft.client.renderer.chunk.ChunkSectionLayer;
+import net.minecraft.client.renderer.chunk.RenderSectionRegion;
 import net.minecraft.client.renderer.chunk.SectionCompiler;
 import net.minecraft.core.SectionPos;
 
@@ -35,12 +36,13 @@ public final class SectionCapture {
 		}
 	}
 
-	public static void onCompiled(SectionPos pos, SectionCompiler.Results results) {
+	public static void onCompiled(SectionPos pos, RenderSectionRegion region, SectionCompiler.Results results) {
 		RtRenderer renderer = RtRenderer.get();
 		if (!renderer.isActive()) {
 			return;
 		}
 		Map<ChunkSectionLayer, MeshData> layers = results.renderedLayers;
+		SectionScanner.Result scan = layers.isEmpty() ? null : SectionScanner.scan(region, pos, renderer.materials());
 		synchronized (LOCK) {
 			if (!LIVE.contains(pos.asLong()) || !renderer.isActive()) {
 				return;
@@ -48,7 +50,8 @@ public final class SectionCapture {
 			renderer.updateSection(pos.x(), pos.y(), pos.z(),
 				layers.get(ChunkSectionLayer.SOLID),
 				layers.get(ChunkSectionLayer.CUTOUT),
-				layers.get(ChunkSectionLayer.TRANSLUCENT));
+				layers.get(ChunkSectionLayer.TRANSLUCENT),
+				scan);
 		}
 	}
 }

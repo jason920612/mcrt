@@ -11,7 +11,6 @@ namespace mcrt {
 namespace {
 
 constexpr uint64_t kWaitTimeoutNs = 5'000'000'000ull;
-constexpr uint32_t kMaxAccumulatedFrames = 1024;
 
 // Shader stages, in pipeline order.
 enum Stage : uint32_t {
@@ -39,8 +38,11 @@ struct FrameUniforms {
     float skyColor[4];
     float params[4];
     uint32_t frameInfo[4];
+    int32_t cameraBlock[4];
+    float prevViewProj[16];
+    float prevCameraShift[4];
 };
-static_assert(sizeof(FrameUniforms) == 224, "must match FrameUniforms in pathtrace.slang");
+static_assert(sizeof(FrameUniforms) == 320, "must match FrameUniforms in frame.slang");
 
 void memoryBarrier(VkCommandBuffer cmd, VkPipelineStageFlags srcStage, VkAccessFlags srcAccess,
                    VkPipelineStageFlags dstStage, VkAccessFlags dstAccess) {
@@ -55,19 +57,6 @@ void fullBarrier(VkCommandBuffer cmd) {
                   VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT);
 }
 
-void toGeneralLayout(VkCommandBuffer cmd, VkImage image) {
-    VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-    barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.image = image;
-    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, 0, 0,
-                         nullptr, 0, nullptr, 1, &barrier);
-}
-
 void destroyAccelerationStructure(VkContext& ctx, AccelerationStructure& as) {
     if (as.handle)
         vkDestroyAccelerationStructureKHR(ctx.device(), as.handle, nullptr);
@@ -80,6 +69,8 @@ void destroyAccelerationStructure(VkContext& ctx, AccelerationStructure& as) {
 Renderer::Renderer(std::unique_ptr<VkContext> context) : ctx_(std::move(context)) {
     VkDevice device = ctx_->device();
     sections_ = std::make_unique<SectionManager>(*ctx_, deletion_);
+    denoiser_ = std::make_unique<Denoiser>(*ctx_, deletion_);
+    materials_ = std::make_unique<MaterialStore>(*ctx_, deletion_);
 
     VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
     poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
@@ -133,8 +124,8 @@ Renderer::~Renderer() {
     sections_.reset();
     destroyAccelerationStructure(*ctx_, tlas_);
     ctx_->destroyBuffer(tlasScratch_);
-    ctx_->destroyImage(output_);
-    ctx_->destroyImage(accumulation_);
+    denoiser_.reset();
+    materials_.reset();
     ctx_->destroyBuffer(depth_);
     if (atlasView_)
         vkDestroyImageView(device, atlasView_, nullptr);
@@ -159,13 +150,22 @@ void Renderer::createDescriptors() {
     const VkShaderStageFlags hits = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
     VkDescriptorSetLayoutBinding bindings[] = {
         {0, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, rgen, nullptr},
-        {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, rgen, nullptr},
-        {2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, rgen, nullptr},
+        {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, rgen, nullptr},  // noisy illumination
+        {2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, rgen, nullptr},  // albedo modulation
         {3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, rgen, nullptr},
         {4, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, rgen | hits | VK_SHADER_STAGE_MISS_BIT_KHR, nullptr},
         {5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, hits, nullptr},
         {6, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, hits, nullptr},
         {7, VK_DESCRIPTOR_TYPE_SAMPLER, 1, hits, nullptr},
+        {8, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, rgen, nullptr},
+        {9, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, rgen, nullptr},
+        {10, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, rgen, nullptr}, // foreground
+        {11, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, rgen, nullptr}, // positions
+        {12, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, rgen, nullptr}, // normals (current)
+        {13, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, hits, nullptr},  // material albedo array
+        {14, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, hits, nullptr},  // material data array
+        {15, VK_DESCRIPTOR_TYPE_SAMPLER, 1, hits, nullptr},
+        {16, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, hits, nullptr}, // material params
     };
     VkDescriptorSetLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     layoutInfo.bindingCount = static_cast<uint32_t>(std::size(bindings));
@@ -174,11 +174,11 @@ void Renderer::createDescriptors() {
 
     VkDescriptorPoolSize poolSizes[] = {
         {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, kFramesInFlight},
-        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2 * kFramesInFlight},
-        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2 * kFramesInFlight},
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 5 * kFramesInFlight},
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 5 * kFramesInFlight},
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, kFramesInFlight},
-        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kFramesInFlight},
-        {VK_DESCRIPTOR_TYPE_SAMPLER, kFramesInFlight},
+        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 3 * kFramesInFlight},
+        {VK_DESCRIPTOR_TYPE_SAMPLER, 2 * kFramesInFlight},
     };
     VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     poolInfo.maxSets = kFramesInFlight;
@@ -304,21 +304,17 @@ void Renderer::createShaderBindingTable() {
 }
 
 void Renderer::ensureTargets(uint32_t width, uint32_t height, uint64_t retireValue) {
-    if (output_.image && output_.width == width && output_.height == height)
+    if (denoiser_->ensureTargets(width, height, retireValue))
+        hasPrevious_ = false; // fresh history
+    if (depth_.buffer && depthWidth_ == width && depthHeight_ == height)
         return;
-    Image oldOutput = output_, oldAccumulation = accumulation_;
     Buffer oldDepth = depth_;
-    deletion_.push(retireValue, [this, oldOutput, oldAccumulation, oldDepth]() mutable {
-        ctx_->destroyImage(oldOutput);
-        ctx_->destroyImage(oldAccumulation);
-        ctx_->destroyBuffer(oldDepth);
-    });
-    output_ = ctx_->createStorageImage(width, height, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
-    accumulation_ = ctx_->createStorageImage(width, height, VK_FORMAT_R32G32B32A32_SFLOAT, 0);
+    deletion_.push(retireValue, [this, oldDepth]() mutable { ctx_->destroyBuffer(oldDepth); });
     depth_ = ctx_->createBuffer(VkDeviceSize(width) * height * sizeof(float),
                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                                 MemoryKind::DeviceLocal);
-    targetsNeedInit_ = true;
+    depthWidth_ = width;
+    depthHeight_ = height;
 }
 
 void Renderer::ensureAtlasView(const McrtFrameInput& input, uint64_t retireValue) {
@@ -416,15 +412,26 @@ void Renderer::updateDescriptors(FrameSlot& slot) {
     VkWriteDescriptorSetAccelerationStructureKHR asInfo{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR};
     asInfo.accelerationStructureCount = 1;
     asInfo.pAccelerationStructures = &tlas_.handle;
-    VkDescriptorImageInfo outputInfo{VK_NULL_HANDLE, output_.view, VK_IMAGE_LAYOUT_GENERAL};
-    VkDescriptorImageInfo accumulationInfo{VK_NULL_HANDLE, accumulation_.view, VK_IMAGE_LAYOUT_GENERAL};
+    auto storage = [](const Image& image) { return VkDescriptorImageInfo{VK_NULL_HANDLE, image.view, VK_IMAGE_LAYOUT_GENERAL}; };
+    VkDescriptorImageInfo noisyInfo = storage(denoiser_->noisyIllumination());
+    VkDescriptorImageInfo albedoInfo = storage(denoiser_->albedoModulation());
+    VkDescriptorImageInfo foregroundInfo = storage(denoiser_->foreground());
+    VkDescriptorImageInfo positionInfo = storage(denoiser_->positions());
+    VkDescriptorImageInfo normalInfo = storage(denoiser_->normals(historyIndex_));
     VkDescriptorBufferInfo depthInfo{depth_.buffer, 0, VK_WHOLE_SIZE};
     VkDescriptorBufferInfo uniformInfo{slot.uniforms.buffer, 0, sizeof(FrameUniforms)};
     VkDescriptorBufferInfo sectionInfo{sections_->sectionInfoBuffer().buffer, 0, VK_WHOLE_SIZE};
     VkDescriptorImageInfo atlasInfo{VK_NULL_HANDLE, atlasView_, VK_IMAGE_LAYOUT_GENERAL};
     VkDescriptorImageInfo samplerInfo{atlasSampler_, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED};
+    VkDescriptorBufferInfo lightRangeInfo{sections_->lightRanges().buffer, 0, VK_WHOLE_SIZE};
+    VkDescriptorBufferInfo lightListInfo{sections_->lightList().buffer, 0, VK_WHOLE_SIZE};
 
-    VkWriteDescriptorSet writes[8]{};
+    VkDescriptorImageInfo materialAlbedoInfo{VK_NULL_HANDLE, materials_->albedoView(), VK_IMAGE_LAYOUT_GENERAL};
+    VkDescriptorImageInfo materialDataInfo{VK_NULL_HANDLE, materials_->dataView(), VK_IMAGE_LAYOUT_GENERAL};
+    VkDescriptorImageInfo materialSamplerInfo{materials_->sampler(), VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED};
+    VkDescriptorBufferInfo materialParamsInfo{materials_->params().buffer, 0, VK_WHOLE_SIZE};
+
+    VkWriteDescriptorSet writes[17]{};
     auto write = [&](uint32_t binding, VkDescriptorType type) -> VkWriteDescriptorSet& {
         VkWriteDescriptorSet& w = writes[binding];
         w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -435,30 +442,23 @@ void Renderer::updateDescriptors(FrameSlot& slot) {
         return w;
     };
     write(0, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR).pNext = &asInfo;
-    write(1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).pImageInfo = &outputInfo;
-    write(2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).pImageInfo = &accumulationInfo;
+    write(1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).pImageInfo = &noisyInfo;
+    write(2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).pImageInfo = &albedoInfo;
     write(3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).pBufferInfo = &depthInfo;
     write(4, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER).pBufferInfo = &uniformInfo;
     write(5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).pBufferInfo = &sectionInfo;
     write(6, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE).pImageInfo = &atlasInfo;
     write(7, VK_DESCRIPTOR_TYPE_SAMPLER).pImageInfo = &samplerInfo;
-    vkUpdateDescriptorSets(ctx_->device(), 8, writes, 0, nullptr);
-}
-
-bool Renderer::updateAccumulation(const McrtFrameInput& input, bool geometryChanged, bool targetsChanged) {
-    bool same = !geometryChanged && !targetsChanged && input.debug_mode == 0 &&
-                std::memcmp(lastViewProj_, input.view_proj, sizeof(lastViewProj_)) == 0 &&
-                std::memcmp(lastCameraBlock_, input.camera_block_pos, sizeof(lastCameraBlock_)) == 0 &&
-                std::memcmp(lastCameraOffset_, input.camera_offset, sizeof(lastCameraOffset_)) == 0;
-    for (int i = 0; i < 3 && same; ++i)
-        same = std::abs(lastSunDir_[i] - input.sun_dir[i]) < 1e-4f;
-
-    std::memcpy(lastViewProj_, input.view_proj, sizeof(lastViewProj_));
-    std::memcpy(lastCameraBlock_, input.camera_block_pos, sizeof(lastCameraBlock_));
-    std::memcpy(lastCameraOffset_, input.camera_offset, sizeof(lastCameraOffset_));
-    std::memcpy(lastSunDir_, input.sun_dir, sizeof(lastSunDir_));
-    accumulatedFrames_ = same ? std::min(accumulatedFrames_ + 1, kMaxAccumulatedFrames) : 0;
-    return same;
+    write(8, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).pBufferInfo = &lightRangeInfo;
+    write(9, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).pBufferInfo = &lightListInfo;
+    write(10, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).pImageInfo = &foregroundInfo;
+    write(11, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).pImageInfo = &positionInfo;
+    write(12, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).pImageInfo = &normalInfo;
+    write(13, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE).pImageInfo = &materialAlbedoInfo;
+    write(14, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE).pImageInfo = &materialDataInfo;
+    write(15, VK_DESCRIPTOR_TYPE_SAMPLER).pImageInfo = &materialSamplerInfo;
+    write(16, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).pBufferInfo = &materialParamsInfo;
+    vkUpdateDescriptorSets(ctx_->device(), 17, writes, 0, nullptr);
 }
 
 McrtStats Renderer::stats() const {
@@ -466,8 +466,8 @@ McrtStats Renderer::stats() const {
     s.resident_sections = static_cast<uint32_t>(sections_->residentCount());
     s.pending_sections = static_cast<uint32_t>(sections_->pendingCount());
     s.tlas_instances = tlasInstanceCount_;
-    s.accumulated_frames = accumulatedFrames_;
     s.gpu_frame_ms = gpuFrameMs_;
+    s.lights = static_cast<uint32_t>(sections_->lightCount());
     return s;
 }
 
@@ -511,8 +511,6 @@ bool Renderer::renderFrame(const McrtFrameInput& input, McrtFrameOutput& output)
     vkResetQueryPool(ctx_->device(), timestamps_, slotIndex * 2, 2);
 
     const uint64_t retireValue = lastSignalValue_ + 1; // the value this frame signals
-    const bool targetsChanged = !output_.image || output_.width != input.width || output_.height != input.height ||
-                                reinterpret_cast<VkImage>(input.atlas_image) != atlasImage_;
     ensureTargets(input.width, input.height, retireValue);
     ensureAtlasView(input, retireValue);
 
@@ -526,13 +524,10 @@ bool Renderer::renderFrame(const McrtFrameInput& input, McrtFrameOutput& output)
     // previous frames), which is what makes the shared scratch and TLAS buffers safe to reuse.
     fullBarrier(cmd);
     vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, timestamps_, slotIndex * 2);
-    if (targetsNeedInit_) {
-        toGeneralLayout(cmd, output_.image);
-        toGeneralLayout(cmd, accumulation_.image);
-        targetsNeedInit_ = false;
-    }
+    denoiser_->recordTargetInit(cmd);
+    materials_->recordUploads(cmd, retireValue);
 
-    const bool geometryChanged = sections_->recordUpdates(cmd, slotIndex, retireValue, input.camera_block_pos);
+    sections_->recordUpdates(cmd, slotIndex, retireValue, input.camera_block_pos);
     memoryBarrier(cmd, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
                   VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
                   VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
@@ -542,7 +537,7 @@ bool Renderer::renderFrame(const McrtFrameInput& input, McrtFrameOutput& output)
                   VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
                   VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR);
 
-    updateAccumulation(input, geometryChanged, targetsChanged);
+    historyIndex_ ^= 1;
     FrameUniforms uniforms{};
     std::memcpy(uniforms.viewProj, input.view_proj, sizeof(uniforms.viewProj));
     std::memcpy(uniforms.invViewProj, input.inv_view_proj, sizeof(uniforms.invViewProj));
@@ -551,12 +546,27 @@ bool Renderer::renderFrame(const McrtFrameInput& input, McrtFrameOutput& output)
     std::memcpy(uniforms.moonDir, input.moon_dir, sizeof(uniforms.moonDir));
     std::memcpy(uniforms.skyColor, input.sky_color, sizeof(uniforms.skyColor));
     uniforms.params[0] = input.time_seconds;
-    uniforms.params[1] = static_cast<float>(accumulatedFrames_);
+    uniforms.params[1] = input.pixel_spread;
     uniforms.params[2] = static_cast<float>(input.debug_mode);
     uniforms.params[3] = input.rain;
     uniforms.frameInfo[0] = input.frame_index;
     uniforms.frameInfo[1] = input.width;
     uniforms.frameInfo[2] = input.height;
+    for (int i = 0; i < 3; ++i)
+        uniforms.cameraBlock[i] = input.camera_block_pos[i];
+    if (!hasPrevious_) {
+        std::memcpy(prevViewProj_, input.view_proj, sizeof(prevViewProj_));
+        std::memcpy(prevCameraBlock_, input.camera_block_pos, sizeof(prevCameraBlock_));
+        std::memcpy(prevCameraOffset_, input.camera_offset, sizeof(prevCameraOffset_));
+        hasPrevious_ = true;
+    }
+    std::memcpy(uniforms.prevViewProj, prevViewProj_, sizeof(uniforms.prevViewProj));
+    for (int i = 0; i < 3; ++i)
+        uniforms.prevCameraShift[i] =
+            float(input.camera_block_pos[i] - prevCameraBlock_[i]) - prevCameraOffset_[i];
+    std::memcpy(prevViewProj_, input.view_proj, sizeof(prevViewProj_));
+    std::memcpy(prevCameraBlock_, input.camera_block_pos, sizeof(prevCameraBlock_));
+    std::memcpy(prevCameraOffset_, input.camera_offset, sizeof(prevCameraOffset_));
     ctx_->writeBuffer(slot.uniforms, &uniforms, sizeof(uniforms));
     updateDescriptors(slot);
 
@@ -566,12 +576,16 @@ bool Renderer::renderFrame(const McrtFrameInput& input, McrtFrameOutput& output)
     vkCmdTraceRaysKHR(cmd, &raygenRegion_, &missRegion_, &hitRegion_, &callableRegion_, input.width, input.height, 1);
 
     memoryBarrier(cmd, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, VK_ACCESS_SHADER_WRITE_BIT,
-                  VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+    denoiser_->record(cmd, slotIndex, slot.uniforms, sizeof(FrameUniforms), historyIndex_);
+
+    memoryBarrier(cmd, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                  VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
     VkImageCopy colorCopy{};
     colorCopy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     colorCopy.dstSubresource = colorCopy.srcSubresource;
     colorCopy.extent = {input.width, input.height, 1};
-    vkCmdCopyImage(cmd, output_.image, VK_IMAGE_LAYOUT_GENERAL, reinterpret_cast<VkImage>(input.color_image),
+    vkCmdCopyImage(cmd, denoiser_->output().image, VK_IMAGE_LAYOUT_GENERAL, reinterpret_cast<VkImage>(input.color_image),
                    VK_IMAGE_LAYOUT_GENERAL, 1, &colorCopy);
     VkBufferImageCopy depthCopy{};
     depthCopy.imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};

@@ -42,6 +42,7 @@ public final class RtRenderer {
 	private volatile State state = State.UNINITIALIZED;
 	private NativeBridge bridge;
 	private MemorySegment ctx;
+	private MaterialRegistry materials = new MaterialRegistry();
 	private VulkanDevice device;
 	private final MemorySegment input = Arena.global().allocate(NativeBridge.FRAME_INPUT_SIZE, 16);
 	private final MemorySegment output = Arena.global().allocate(NativeBridge.FRAME_OUTPUT_SIZE, 8);
@@ -86,11 +87,23 @@ public final class RtRenderer {
 	}
 
 	// Called with SectionCapture.LOCK held.
-	void updateSection(int x, int y, int z, MeshData solid, MeshData cutout, MeshData translucent) {
-		bridge.sectionUpdate(ctx, x, y, z,
-			vertices(solid), vertexCount(solid),
-			vertices(cutout), vertexCount(cutout),
-			vertices(translucent), vertexCount(translucent));
+	MaterialRegistry materials() {
+		return materials;
+	}
+
+	// Called with SectionCapture.LOCK held. scan is null for sections without geometry.
+	void updateSection(int x, int y, int z, MeshData solid, MeshData cutout, MeshData translucent, SectionScanner.Result scan) {
+		try (Arena arena = Arena.ofConfined()) {
+			int[] emitters = scan == null ? new int[0] : scan.emitters();
+			MemorySegment lights = emitters.length == 0 ? MemorySegment.NULL : arena.allocateFrom(JAVA_INT, emitters);
+			MemorySegment blockMaterials = scan == null || scan.materials() == null
+				? MemorySegment.NULL : arena.allocateFrom(JAVA_INT, scan.materials());
+			bridge.sectionUpdate(ctx, x, y, z,
+				vertices(solid), vertexCount(solid),
+				vertices(cutout), vertexCount(cutout),
+				vertices(translucent), vertexCount(translucent),
+				lights, emitters.length, blockMaterials);
+		}
 	}
 
 	// Called with SectionCapture.LOCK held.
@@ -157,6 +170,9 @@ public final class RtRenderer {
 		putMatrix(NativeBridge.OFF_INV_VIEW_PROJ, invViewProj);
 		putSky(level.skyRenderState);
 		input.set(JAVA_FLOAT, NativeBridge.OFF_TIME, (System.nanoTime() - startNanos) * 1e-9f);
+		// Angle one pixel subtends at the screen center; drives texture LOD selection.
+		Matrix4f projection = hasLevelProjection ? levelProjection : camera.projectionMatrix;
+		input.set(JAVA_FLOAT, NativeBridge.OFF_PIXEL_SPREAD, 2f / (color.getHeight(0) * Math.abs(projection.m11())));
 
 		int result = bridge.renderFrame(ctx, input, output);
 		if (result < 0) {
@@ -184,10 +200,10 @@ public final class RtRenderer {
 			return;
 		}
 		bridge.getStats(ctx, stats);
-		McrtClient.LOGGER.info("[stats] fps={} gpuPass={}ms sections={} pending={} instances={} accumulated={}",
+		McrtClient.LOGGER.info("[stats] fps={} gpuPass={}ms sections={} pending={} instances={} lights={}",
 			String.format("%.1f", statsWindowFrames / ((now - statsWindowStart) * 1e-9)),
 			String.format("%.2f", stats.get(JAVA_FLOAT, 16)),
-			stats.get(JAVA_INT, 0), stats.get(JAVA_INT, 4), stats.get(JAVA_INT, 8), stats.get(JAVA_INT, 12));
+			stats.get(JAVA_INT, 0), stats.get(JAVA_INT, 4), stats.get(JAVA_INT, 8), stats.get(JAVA_INT, 20));
 		McrtClient.LOGGER.info("[sky] sun=({}, {}, {}, i={}) moon=({}, {}, {}, i={}) skyColor=({}, {}, {}) rain={}",
 			input.get(JAVA_FLOAT, NativeBridge.OFF_SUN_DIR), input.get(JAVA_FLOAT, NativeBridge.OFF_SUN_DIR + 4),
 			input.get(JAVA_FLOAT, NativeBridge.OFF_SUN_DIR + 8), input.get(JAVA_FLOAT, NativeBridge.OFF_SUN_DIR + 12),
@@ -259,6 +275,8 @@ public final class RtRenderer {
 			}
 			ctx = created;
 			device = vulkanDevice;
+			materials = MaterialRegistry.load();
+			materials.upload(bridge, ctx);
 			state = State.READY;
 			McrtClient.LOGGER.info("MCRT native path tracer initialized");
 		} catch (Exception | LinkageError e) {

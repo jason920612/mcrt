@@ -47,6 +47,7 @@ final class NativeBridge {
 	static final long OFF_SKY_COLOR = 256;
 	static final long OFF_TIME = 272;
 	static final long OFF_RAIN = 276;
+	static final long OFF_PIXEL_SPREAD = 280;
 
 	static final long FRAME_OUTPUT_SIZE = 24;
 	static final long OFF_OUT_COMMAND_BUFFER = 0;
@@ -59,6 +60,7 @@ final class NativeBridge {
 	private final MethodHandle sectionRemove;
 	private final MethodHandle sectionsClear;
 	private final MethodHandle getStats;
+	private final MethodHandle materialUpload;
 	private final MethodHandle destroy;
 	private final MethodHandle lastError;
 
@@ -70,11 +72,13 @@ final class NativeBridge {
 			FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS, ADDRESS));
 		this.sectionUpdate = linker.downcallHandle(lib.findOrThrow("mcrt_section_update"),
 			FunctionDescriptor.ofVoid(ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT,
-				ADDRESS, JAVA_INT, ADDRESS, JAVA_INT, ADDRESS, JAVA_INT));
+				ADDRESS, JAVA_INT, ADDRESS, JAVA_INT, ADDRESS, JAVA_INT, ADDRESS, JAVA_INT, ADDRESS));
 		this.sectionRemove = linker.downcallHandle(lib.findOrThrow("mcrt_section_remove"),
 			FunctionDescriptor.ofVoid(ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT));
 		this.sectionsClear = linker.downcallHandle(lib.findOrThrow("mcrt_sections_clear"),
 			FunctionDescriptor.ofVoid(ADDRESS));
+		this.materialUpload = linker.downcallHandle(lib.findOrThrow("mcrt_material_upload"),
+			FunctionDescriptor.ofVoid(ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_LONG, JAVA_LONG));
 		this.getStats = linker.downcallHandle(lib.findOrThrow("mcrt_get_stats"),
 			FunctionDescriptor.ofVoid(ADDRESS, ADDRESS));
 		this.destroy = linker.downcallHandle(lib.findOrThrow("mcrt_destroy"),
@@ -116,9 +120,11 @@ final class NativeBridge {
 
 	void sectionUpdate(MemorySegment ctx, int x, int y, int z,
 			MemorySegment solid, int solidVertices, MemorySegment cutout, int cutoutVertices,
-			MemorySegment translucent, int translucentVertices) {
+			MemorySegment translucent, int translucentVertices, MemorySegment lights, int lightCount,
+			MemorySegment blockMaterials) {
 		try {
-			sectionUpdate.invokeExact(ctx, x, y, z, solid, solidVertices, cutout, cutoutVertices, translucent, translucentVertices);
+			sectionUpdate.invokeExact(ctx, x, y, z, solid, solidVertices, cutout, cutoutVertices, translucent, translucentVertices,
+				lights, lightCount, blockMaterials);
 		} catch (Throwable t) {
 			throw new RuntimeException(t);
 		}
@@ -135,6 +141,14 @@ final class NativeBridge {
 	void sectionsClear(MemorySegment ctx) {
 		try {
 			sectionsClear.invokeExact(ctx);
+		} catch (Throwable t) {
+			throw new RuntimeException(t);
+		}
+	}
+
+	void materialUpload(MemorySegment ctx, int index, int count, int size, int scale, int flags, long albedoRgba, long dataRgba) {
+		try {
+			materialUpload.invokeExact(ctx, index, count, size, scale, flags, albedoRgba, dataRgba);
 		} catch (Throwable t) {
 			throw new RuntimeException(t);
 		}

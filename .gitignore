@@ -7,3 +7,4 @@ out/
 .vscode/
 tools/slang/
 native/out/
+tools/materials/.cache/

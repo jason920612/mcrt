@@ -5,9 +5,11 @@
 	"client": [
 		"FrontendGpuDeviceAccessor",
 		"GameRendererMixin",
+		"LevelExtractorMixin",
 		"LevelRendererMixin",
 		"RenderSectionMixin",
 		"SectionCompileTaskMixin",
+		"SectionRegionLightingMixin",
 		"VulkanFeatureSetsMixin"
 	],
 	"injectors": {
