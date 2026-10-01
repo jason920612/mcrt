@@ -14,6 +14,8 @@ constexpr uint32_t kLeaves = 1;
 constexpr uint32_t kLogX = 2;
 constexpr uint32_t kLogY = 3;
 constexpr uint32_t kLogZ = 4;
+constexpr uint32_t kHidden = 5; // dropped without replacement (grass plants: terrain grass cards stand in)
+constexpr uint32_t kNeedles = 6; // conifer leaves: foliage cards with the needle texture
 
 inline uint32_t shapeOf(const uint32_t* blockMaterials, int local) {
     return blockMaterials ? blockMaterials[local] >> 24 : 0;

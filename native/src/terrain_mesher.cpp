@@ -14,6 +14,8 @@ namespace {
 constexpr size_t kQuadBytes = size_t(MCRT_VERTEX_STRIDE) * 4;
 constexpr uint32_t kSmoothFlag = 1; // vertex light word bit 0: smoothed terrain vertex
 constexpr uint32_t kAtlasFlag = 2;  // bit 1: textured from the atlas sprite packed into color/word
+constexpr uint32_t kCardFlag = 4;   // bit 2: vegetation card (material texture with coverage alpha)
+constexpr uint32_t kTerrainFlag = 8; // bit 3: natural terrain (gets macro detail in the shader)
 
 struct Vec3 {
     float x, y, z;
@@ -62,7 +64,11 @@ constexpr float kPinMargin = 0.2f;        // field value forced at block centers
 
 enum Relief : uint8_t { kReliefNone = 0, kReliefSoil = 1, kReliefRock = 2, kReliefSand = 3, kReliefSnow = 4 };
 
-std::atomic<uint8_t> g_relief[256];
+std::atomic<uint32_t> g_materialFlags[256];
+std::atomic<uint32_t> g_cardMaterials[4];
+
+constexpr uint32_t kMaterialTinted = 1;
+constexpr uint32_t kMaterialCard = 2;
 
 uint32_t hash3(int x, int y, int z) {
     uint32_t h = uint32_t(x) * 0x8da6b343u ^ uint32_t(y) * 0xd8163841u ^ uint32_t(z) * 0xcb1ab31fu;
@@ -149,7 +155,7 @@ uint8_t reliefOf(uint16_t materials) {
     uint32_t top = materials & 0xFF, side = materials >> 8;
     auto kind = [](uint32_t id) -> uint8_t {
         if (id == kAtlasMaterial) return kReliefRock; // ores sit in stone
-        return id ? g_relief[id].load(std::memory_order_relaxed) : uint8_t(kReliefNone);
+        return id ? uint8_t((g_materialFlags[id].load(std::memory_order_relaxed) >> 8) & 0xFF) : uint8_t(kReliefNone);
     };
     uint8_t topKind = kind(top);
     if (topKind == kReliefSnow || topKind == kReliefSand)
@@ -298,13 +304,21 @@ struct CellVertex {
 
 } // namespace
 
-void setMaterialRelief(uint32_t materialId, uint32_t relief) {
-    if (materialId < 256)
-        g_relief[materialId].store(uint8_t(relief), std::memory_order_relaxed);
+void setMaterialFlags(uint32_t materialId, uint32_t flags) {
+    if (materialId >= 256)
+        return;
+    g_materialFlags[materialId].store(flags, std::memory_order_relaxed);
+    const uint32_t kind = (flags >> 16) & 0xFF;
+    if ((flags & kMaterialCard) && kind < 4)
+        g_cardMaterials[kind].store(materialId, std::memory_order_relaxed);
 }
 
-void appendSmoothTerrain(std::vector<uint8_t>& layer, const uint8_t* terrainInput, const SpriteRect* sprites,
-                         int sectionX, int sectionY, int sectionZ) {
+uint32_t cardMaterial(uint32_t kind) {
+    return kind < 4 ? g_cardMaterials[kind].load(std::memory_order_relaxed) : 0;
+}
+
+void appendSmoothTerrain(std::vector<uint8_t>& layer, std::vector<uint8_t>& cutout, const uint8_t* terrainInput,
+                         const SpriteRect* sprites, int sectionX, int sectionY, int sectionZ) {
     constexpr size_t kCells = size_t(kBorder) * kBorder * kBorder;
     TerrainInput in{terrainInput, reinterpret_cast<const uint16_t*>(terrainInput + kCells),
                     reinterpret_cast<const uint32_t*>(terrainInput + kCells * 3)};
@@ -372,17 +386,20 @@ void appendSmoothTerrain(std::vector<uint8_t>& layer, const uint8_t* terrainInpu
 
     auto unorm16 = [](float v) { return uint32_t(std::clamp(v, 0.0f, 1.0f) * 65535.0f + 0.5f); };
     const float ox = float(sectionX * 16), oy = float(sectionY * 16), oz = float(sectionZ * 16);
+    // Materials are looked up at a noise-displaced point, so material boundaries meander through
+    // the terrain instead of following the block grid.
+    auto materialProbe = [&](const float p[3], float probe[3]) {
+        const float wx = p[0] + ox, wy = p[1] + oy, wz = p[2] + oz;
+        probe[0] = p[0] + (valueNoise(wx * 0.4f, wy * 0.4f, wz * 0.4f + 5.3f) - 0.5f) * 1.7f;
+        probe[1] = p[1] + (valueNoise(wx * 0.4f + 9.1f, wy * 0.4f, wz * 0.4f) - 0.5f) * 0.6f;
+        probe[2] = p[2] + (valueNoise(wx * 0.4f, wy * 0.4f + 3.7f, wz * 0.4f) - 0.5f) * 1.7f;
+    };
     auto writeCell = [&](uint8_t* dst, const CellVertex& cell) {
-        uint32_t word = kSmoothFlag;
+        uint32_t word = kSmoothFlag | kTerrainFlag;
         uint32_t color = 0xFFFFFFFFu;
         int bx = 0, by = 0, bz = 0;
-        // Look the material up at a noise-displaced point, so material boundaries meander through
-        // the terrain instead of following the block grid.
-        const float wx = cell.position[0] + ox, wy = cell.position[1] + oy, wz = cell.position[2] + oz;
-        const float probe[3] = {
-            cell.position[0] + (valueNoise(wx * 0.4f, wy * 0.4f, wz * 0.4f + 5.3f) - 0.5f) * 1.7f,
-            cell.position[1] + (valueNoise(wx * 0.4f + 9.1f, wy * 0.4f, wz * 0.4f) - 0.5f) * 0.6f,
-            cell.position[2] + (valueNoise(wx * 0.4f, wy * 0.4f + 3.7f, wz * 0.4f) - 0.5f) * 1.7f};
+        float probe[3];
+        materialProbe(cell.position, probe);
         if (nearestSmoothBlock(in, probe, true, bx, by, bz) || nearestSmoothBlock(in, cell.position, true, bx, by, bz)) {
             uint16_t materials = in.material(bx, by, bz);
             const bool inSection = bx >= 0 && bx < 16 && by >= 0 && by < 16 && bz >= 0 && bz < 16;
@@ -390,13 +407,13 @@ void appendSmoothTerrain(std::vector<uint8_t>& layer, const uint8_t* terrainInpu
                 // Atlas sprite: origin in color (2 x 16-bit normalized), width in the word's high half.
                 const SpriteRect& sprite = sprites[(by << 8) | (bz << 4) | bx];
                 color = unorm16(sprite.u0) | (unorm16(sprite.v0) << 16);
-                word = kSmoothFlag | kAtlasFlag | (unorm16(sprite.u1 - sprite.u0) << 16);
+                word = kSmoothFlag | kAtlasFlag | kTerrainFlag | (unorm16(sprite.u1 - sprite.u0) << 16);
             } else {
                 if ((materials & 0xFF) == kAtlasMaterial && nearestSmoothBlock(in, probe, false, bx, by, bz))
                     materials = in.material(bx, by, bz);
                 if ((materials & 0xFF) == kAtlasMaterial)
                     materials = 0;
-                word = kSmoothFlag | (uint32_t(materials & 0xFF) << 16) | (uint32_t(materials >> 8) << 24);
+                word = kSmoothFlag | kTerrainFlag | (uint32_t(materials & 0xFF) << 16) | (uint32_t(materials >> 8) << 24);
                 color = in.tint(bx, bz);
             }
         }
@@ -473,6 +490,101 @@ void appendSmoothTerrain(std::vector<uint8_t>& layer, const uint8_t* terrainInpu
                     for (int n = 0; n < 4; ++n)
                         writeCell(layer.data() + offset + n * MCRT_VERTEX_STRIDE, *q[flip ? 3 - n : n]);
                 }
+
+    // Grass: alpha-tested cards rooted on the surface wherever the ground is grass and gentle.
+    const uint32_t card = cardMaterial(kCardGrass);
+    if (card == 0)
+        return;
+    // Field value by trilinear interpolation between samples.
+    auto fieldAt = [&](float x, float y, float z) {
+        const float gx = x / kSpacing, gy = y / kSpacing, gz = z / kSpacing;
+        const int i = std::clamp(int(std::floor(gx)), kSampleMin, kSampleMax - 1);
+        const int j = std::clamp(int(std::floor(gy)), kSampleMin, kSampleMax - 1);
+        const int k = std::clamp(int(std::floor(gz)), kSampleMin, kSampleMax - 1);
+        const float tx = std::clamp(gx - i, 0.0f, 1.0f), ty = std::clamp(gy - j, 0.0f, 1.0f), tz = std::clamp(gz - k, 0.0f, 1.0f);
+        auto lerp = [](float a, float b, float t) { return a + (b - a) * t; };
+        const float c00 = lerp(field.value(i, j, k), field.value(i + 1, j, k), tx);
+        const float c10 = lerp(field.value(i, j + 1, k), field.value(i + 1, j + 1, k), tx);
+        const float c01 = lerp(field.value(i, j, k + 1), field.value(i + 1, j, k + 1), tx);
+        const float c11 = lerp(field.value(i, j + 1, k + 1), field.value(i + 1, j + 1, k + 1), tx);
+        return lerp(lerp(c00, c10, ty), lerp(c01, c11, ty), tz);
+    };
+    auto isGrass = [&](uint16_t materials) {
+        const uint32_t top = materials & 0xFF;
+        if (top == 0 || top == kAtlasMaterial)
+            return false;
+        const uint32_t flags = g_materialFlags[top].load(std::memory_order_relaxed);
+        return (flags & kMaterialTinted) != 0 && ((flags >> 8) & 0xFF) == kReliefSoil;
+    };
+    auto rand01 = [](uint32_t& state) {
+        state = state * 1664525u + 1013904223u;
+        return float(state >> 8) * (1.0f / 16777216.0f);
+    };
+    for (int y = 0; y < 16; ++y)
+        for (int z = 0; z < 16; ++z)
+            for (int x = 0; x < 16; ++x) {
+                if (in.type(x, y, z) != kSmooth || !isGrass(in.material(x, y, z)))
+                    continue;
+                const uint8_t above = in.type(x, y + 1, z);
+                if (above != kOpen)
+                    continue;
+                const int ax = x + sectionX * 16, ay = y + sectionY * 16, az = z + sectionZ * 16;
+                uint32_t state = hash3(ax, ay, az);
+                // Meadows are patchy: denser in some places, thin in others.
+                const float density = valueNoise(ax * 0.15f, ay * 0.15f, az * 0.15f);
+                const int count = int(3.0f + density * 5.0f);
+                for (int c = 0; c < count; ++c) {
+                    const float px = x + rand01(state), pz = z + rand01(state);
+                    // Find the ground: the field crosses zero going up through this column.
+                    float lo = y - 0.6f, hi = y + 1.6f;
+                    if (!(fieldAt(px, lo, pz) > 0.0f) || fieldAt(px, hi, pz) > 0.0f)
+                        continue;
+                    for (int it = 0; it < 12; ++it) {
+                        const float mid = 0.5f * (lo + hi);
+                        (fieldAt(px, mid, pz) > 0.0f ? lo : hi) = mid;
+                    }
+                    const float py = 0.5f * (lo + hi);
+                    // Only on gentle ground, and only where the meandering material lookup says grass.
+                    const float e = 0.25f;
+                    const float gx = fieldAt(px + e, py, pz) - fieldAt(px - e, py, pz);
+                    const float gy = fieldAt(px, py + e, pz) - fieldAt(px, py - e, pz);
+                    const float gz = fieldAt(px, py, pz + e) - fieldAt(px, py, pz - e);
+                    const float glen = std::sqrt(gx * gx + gy * gy + gz * gz);
+                    if (glen < 1e-6f || -gy / glen < 0.75f)
+                        continue;
+                    const float point[3] = {px, py, pz};
+                    float probe[3];
+                    materialProbe(point, probe);
+                    int bx, by, bz;
+                    if (!nearestSmoothBlock(in, probe, false, bx, by, bz) || !isGrass(in.material(bx, by, bz)))
+                        continue;
+
+                    const float yaw = rand01(state) * 6.2831853f;
+                    const float width = 0.7f + rand01(state) * 0.6f;
+                    const float height = (0.3f + rand01(state) * 0.35f) * (0.7f + density * 0.6f);
+                    const float dirX = std::cos(yaw) * width * 0.5f, dirZ = std::sin(yaw) * width * 0.5f;
+                    const float leanX = (rand01(state) - 0.5f) * 0.2f, leanZ = (rand01(state) - 0.5f) * 0.2f;
+                    const float u0 = rand01(state), u1 = u0 + width * 0.6f;
+                    const float base = py - 0.06f; // sink the roots slightly into the ground
+                    const float corners[4][5] = {
+                        {px - dirX, base, pz - dirZ, u0, 1.0f},
+                        {px + dirX, base, pz + dirZ, u1, 1.0f},
+                        {px + dirX + leanX, base + height, pz + dirZ + leanZ, u1, 0.0f},
+                        {px - dirX + leanX, base + height, pz - dirZ + leanZ, u0, 0.0f},
+                    };
+                    const uint32_t color = in.tint(bx, bz);
+                    const uint32_t word = kCardFlag | (card << 16);
+                    const size_t offset = cutout.size();
+                    cutout.resize(offset + kQuadBytes);
+                    for (int v = 0; v < 4; ++v) {
+                        uint8_t* dst = cutout.data() + offset + v * MCRT_VERTEX_STRIDE;
+                        std::memcpy(dst, corners[v], 12);
+                        std::memcpy(dst + 12, &color, 4);
+                        std::memcpy(dst + 16, corners[v] + 3, 8);
+                        std::memcpy(dst + 24, &word, 4);
+                    }
+                }
+            }
 }
 
 

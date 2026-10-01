@@ -69,6 +69,8 @@ struct MaterialParams
     float pad;
 };
 static const uint MATERIAL_TINTED = 1;
+static const uint VERTEX_CARD = 4;     // vertex light word: vegetation card (see terrain_mesher.cpp)
+static const uint VERTEX_TERRAIN = 8;  // natural terrain
 [[vk::binding(13, 0)]] Texture2DArray<float4> materialAlbedo; // sRGB view: rgb linear base color, a = height
 [[vk::binding(14, 0)]] Texture2DArray<float4> materialNormal; // BC5: normal xy (OpenGL convention)
 [[vk::binding(15, 0)]] SamplerState materialSampler;
@@ -201,6 +203,9 @@ void applyMacroDetail(inout SurfaceSample s, float3 world)
 
 // Plains grass color: tinted materials are authored for it and shift with the biome tint.
 static const float3 REFERENCE_TINT = float3(0.569, 0.741, 0.349);
+// Plains foliage color (0x48B518): foliage cards are authored for it.
+static const float3 REFERENCE_FOLIAGE = float3(0.282, 0.71, 0.094);
+static const uint CARD_GRASS = 1;
 
 float3 octDecode(float2 e)
 {
@@ -486,6 +491,28 @@ SurfaceSample fetchSurface(BuiltInTriangleIntersectionAttributes attribs, uint f
     s.roughness = 0.9;
     s.materialId = 0;
     s.emission = float((v0.light >> 12) & 0xF) / 15.0;
+    if ((v0.light & VERTEX_CARD) != 0)
+    {
+        // Vegetation card: material texture with coverage alpha, tinted by the biome color, lit
+        // with a mostly upward normal so a field of cards shades like a meadow, not like planes.
+        uint cardId = (v0.light >> 16) & 0xFF;
+        MaterialParams params = materialParams[cardId - 1];
+        float3 pos = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
+        float distance = length(pos - frame.cameraOffset.xyz);
+        float lod = log2(max(distance * frame.params.y * params.textureSize * 0.6, 1.0));
+        float4 t = materialAlbedo.SampleLevel(materialSampler, float3(uv, float(cardId - 1)), lod);
+        bool grass = ((params.flags >> 16) & 0xFF) == CARD_GRASS;
+        float3 reference = grass ? REFERENCE_TINT : REFERENCE_FOLIAGE;
+        // Grass follows the biome color fully; foliage textures are authored natural greens, so the
+        // biome foliage color only nudges them (it is far more saturated than real leaves).
+        float3 ratio = clamp(pow(tint.rgb, 2.2) / pow(reference, 2.2), 0.0, 2.5);
+        s.albedo = t.rgb * (grass ? ratio : lerp(1.0, clamp(sqrt(ratio), 0.6, 1.5), 0.45));
+        s.alpha = t.a;
+        s.normal = normalize(n * (grass ? 0.35 : 0.8) + float3(0.0, 1.0, 0.0) * (grass ? 1.0 : 0.4));
+        s.materialId = grass ? 1 : 0; // marks grass for the shadow any-hit
+        s.roughness = 0.7;
+        return s;
+    }
     if ((v0.light & 1) != 0)
     {
         float3 smoothNormal = normalize(octDecode(v0.uv) * bary.x + octDecode(v1.uv) * bary.y + octDecode(v2.uv) * bary.z);
@@ -534,7 +561,8 @@ SurfaceSample fetchSurface(BuiltInTriangleIntersectionAttributes attribs, uint f
         s.albedo = albedo / used;
         s.normal = normalize(normal + smoothNormal * 1e-3);
         s.roughness = roughness / used;
-        applyMacroDetail(s, world);
+        if ((v0.light & VERTEX_TERRAIN) != 0)
+            applyMacroDetail(s, world);
         if (dot(s.normal, n) < 0.05)
             s.normal = normalize(s.normal + n * (0.05 - dot(s.normal, n)));
         return s;
@@ -582,7 +610,12 @@ void anyHitCutoutPrimary(inout Payload p, BuiltInTriangleIntersectionAttributes 
 [shader("anyhit")]
 void anyHitCutoutShadow(inout ShadowPayload p, BuiltInTriangleIntersectionAttributes attribs)
 {
-    if (fetchSurface(attribs, 1).alpha < 0.5)
+    SurfaceSample s = fetchSurface(attribs, 1);
+    // Grass blades are thin: a card blocks only part of the light passing it (stochastically,
+    // which the denoiser turns into soft shade instead of solid blotches).
+    float coverage = s.materialId == 1 ? s.alpha * 0.35 : s.alpha;
+    float threshold = s.materialId == 1 ? frac(sin(dot(WorldRayOrigin() + WorldRayDirection() * RayTCurrent(), float3(12.9898, 78.233, 37.719))) * 43758.5453) : 0.5;
+    if (coverage < threshold)
         IgnoreHit();
 }
 

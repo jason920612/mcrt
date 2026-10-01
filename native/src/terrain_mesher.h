@@ -40,13 +40,20 @@ void removeReplacedQuads(std::vector<uint8_t>& layer, const uint8_t* occupancy, 
 // materials for the same grid, then uint32 RGBA8 grass colors for its kBorder^2 columns.
 constexpr size_t kTerrainInputBytes = size_t(kBorder) * kBorder * kBorder * 3 + size_t(kBorder) * kBorder * 4;
 
-// Appends the terrain quads (Minecraft's vertex layout, see pathtrace.slang) to a layer.
-// Section coordinates make the relief noise continuous across sections.
-void appendSmoothTerrain(std::vector<uint8_t>& layer, const uint8_t* terrainInput, const SpriteRect* sprites,
-                         int sectionX, int sectionY, int sectionZ);
+// Appends the terrain quads (Minecraft's vertex layout, see pathtrace.slang) to `solid` and grass
+// cards (alpha-tested, rooted on the surface wherever it is grass) to `cutout`. Section
+// coordinates make the relief noise and the scattering continuous across sections.
+void appendSmoothTerrain(std::vector<uint8_t>& solid, std::vector<uint8_t>& cutout, const uint8_t* terrainInput,
+                         const SpriteRect* sprites, int sectionX, int sectionY, int sectionZ);
 
-// Relief kind of a material id (from the material flags' bits 8-15; see build_materials.py).
-void setMaterialRelief(uint32_t materialId, uint32_t relief);
+// Material flags as uploaded (bit 0 tinted, bit 1 vegetation card, bits 8-15 relief kind,
+// bits 16-23 card kind).
+void setMaterialFlags(uint32_t materialId, uint32_t flags);
+
+enum CardKind : uint32_t { kCardGrass = 1, kCardBroadleaf = 2, kCardNeedle = 3 };
+// Material id of the card texture of a kind, or 0 if none was uploaded.
+uint32_t cardMaterial(uint32_t kind);
+constexpr uint32_t kCardVertexFlag = 4; // vertex light word bit 2: vegetation card
 
 // Extends water surface quads (material 255 in the light word) half a block under neighbouring
 // smoothed terrain, so the shoreline becomes the curve where the smooth surface meets the water

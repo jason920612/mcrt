@@ -116,7 +116,7 @@ void MaterialStore::upload(uint32_t index, uint32_t count, uint32_t scale, uint3
         paramsCpu_[index] = Params{float(std::max(scale, 1u)), flags, float(size), 0.0f};
     paramsDirty_ = true;
     pending_.push_back(std::move(pending));
-    terrain::setMaterialRelief(index + 1, (flags >> 8) & 0xFF); // material ids are 1-based
+    terrain::setMaterialFlags(index + 1, flags); // material ids are 1-based
 }
 
 void MaterialStore::recordUploads(VkCommandBuffer cmd, uint64_t retireValue) {

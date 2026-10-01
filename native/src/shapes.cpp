@@ -15,7 +15,7 @@ constexpr float kPi = 3.14159265f;
 
 // Foliage: a few large cards per leaf block break the cube silhouette into a ragged canopy.
 constexpr int kCardsPerLeaf = 3;
-constexpr float kCardHalfSize = 0.72f;
+constexpr float kCardHalfSize = 0.95f;
 // Trunks: octagon slightly inside the block so neighbouring logs read as separate stems.
 constexpr float kTrunkRadius = 0.44f;
 
@@ -74,14 +74,21 @@ Vec3 trunkPoint(uint32_t shape, float a, float b, float c) {
     }
 }
 
-void appendLeafCards(std::vector<uint8_t>& cutout, Vec3 base, uint32_t seed, const BlockLook& look) {
-    const terrain::SpriteRect& s = look.side;
+void appendLeafCards(std::vector<uint8_t>& cutout, Vec3 base, uint32_t seed, const BlockLook& look, bool needles) {
+    // Tinted leaves use the procedural foliage textures (the vertex color carries the biome
+    // foliage color); untinted ones (cherry, azalea...) keep their own sprite.
+    const uint32_t foliage = terrain::cardMaterial(needles ? terrain::kCardNeedle : terrain::kCardBroadleaf);
+    const bool card = foliage != 0 && look.color != 0xFFFFFFFFu;
+    const uint32_t word = card ? terrain::kCardVertexFlag | (foliage << 16) : 0;
+    terrain::SpriteRect s = look.side;
+    if (card)
+        s = {0.0f, 0.0f, 1.0f, 1.0f};
     for (int i = 0; i < kCardsPerLeaf; ++i) {
         uint32_t state = seed * 3 + uint32_t(i);
         float yaw = unit(state) * kPi + float(i) * kPi / kCardsPerLeaf;
         float tilt = (unit(state) - 0.5f) * 0.9f;
-        Vec3 center{base.x + 0.5f + (unit(state) - 0.5f) * 0.3f, base.y + 0.5f + (unit(state) - 0.5f) * 0.3f,
-                    base.z + 0.5f + (unit(state) - 0.5f) * 0.3f};
+        Vec3 center{base.x + 0.5f + (unit(state) - 0.5f) * 0.6f, base.y + 0.5f + (unit(state) - 0.5f) * 0.6f,
+                    base.z + 0.5f + (unit(state) - 0.5f) * 0.6f};
         Vec3 u{std::cos(yaw), 0.0f, std::sin(yaw)};
         // "Up" leaning by `tilt` around u.
         Vec3 v{-std::sin(yaw) * std::sin(tilt), std::cos(tilt), std::cos(yaw) * std::sin(tilt)};
@@ -90,10 +97,10 @@ void appendLeafCards(std::vector<uint8_t>& cutout, Vec3 base, uint32_t seed, con
                         center.z + (u.z * su + v.z * sv) * kCardHalfSize};
         };
         uint8_t* q = appendQuad(cutout);
-        putVertex(q, corner(-1, -1), look.color, s.u0, s.v1, 0);
-        putVertex(q + MCRT_VERTEX_STRIDE, corner(1, -1), look.color, s.u1, s.v1, 0);
-        putVertex(q + 2 * MCRT_VERTEX_STRIDE, corner(1, 1), look.color, s.u1, s.v0, 0);
-        putVertex(q + 3 * MCRT_VERTEX_STRIDE, corner(-1, 1), look.color, s.u0, s.v0, 0);
+        putVertex(q, corner(-1, -1), look.color, s.u0, s.v1, word);
+        putVertex(q + MCRT_VERTEX_STRIDE, corner(1, -1), look.color, s.u1, s.v1, word);
+        putVertex(q + 2 * MCRT_VERTEX_STRIDE, corner(1, 1), look.color, s.u1, s.v0, word);
+        putVertex(q + 3 * MCRT_VERTEX_STRIDE, corner(-1, 1), look.color, s.u0, s.v0, word);
     }
 }
 
@@ -186,7 +193,7 @@ void removeShapedQuads(std::vector<uint8_t>& layer, const uint32_t* blockMateria
         }
         // End faces of a log point along its axis.
         const int axis = shape == kLogX ? 0 : (shape == kLogZ ? 2 : 1);
-        if (shape != kLeaves && std::fabs(normal[axis]) > 0.7f) {
+        if (shape != kLeaves && shape != kNeedles && std::fabs(normal[axis]) > 0.7f) {
             look.cap = rect;
             look.capFaces |= normal[axis] > 0.0f ? 1 : 2;
         } else {
@@ -205,11 +212,11 @@ void appendShapes(std::vector<uint8_t>& solid, std::vector<uint8_t>& cutout, int
         const int x = local & 15, y = local >> 8, z = (local >> 4) & 15;
         const Vec3 base{float(x), float(y), float(z)};
         const uint32_t shape = shapeOf(blockMaterials, local);
-        if (shape == kLeaves) {
+        if (shape == kLeaves || shape == kNeedles) {
             uint32_t seed = hash(uint32_t(sectionX * 16 + x) * 73856093u ^ uint32_t(sectionY * 16 + y) * 19349663u ^
                                  uint32_t(sectionZ * 16 + z) * 83492791u);
-            appendLeafCards(cutout, base, seed, look);
-        } else if (look.side.u1 > look.side.u0) {
+            appendLeafCards(cutout, base, seed, look, shape == kNeedles);
+        } else if (shape != kHidden && look.side.u1 > look.side.u0) {
             appendTrunk(solid, base, shape, blockMaterials[local], look);
         }
     }

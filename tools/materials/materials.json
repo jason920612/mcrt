@@ -1,5 +1,5 @@
 {
-	"_comment": "smooth = rendered as smoothed natural terrain (visual only); atlas = smoothed but textured with Minecraft's own block texture (ores). Material sources (all CC0 from ambientCG) and which Minecraft block faces use them. scale = blocks covered by one texture repeat. tinted = multiplied by the biome tint (normalized to plains grass). relief = how smoothed terrain of the material is sculpted (soil, rock, sand, snow).",
+	"_comment": "smooth = rendered as smoothed natural terrain (visual only); atlas = smoothed but textured with Minecraft's own block texture (ores). Material sources (all CC0 from ambientCG) and which Minecraft block faces use them. scale = blocks covered by one texture repeat. tinted = multiplied by the biome tint (normalized to plains grass). relief = how smoothed terrain of the material is sculpted (soil, rock, sand, snow). card = alpha-tested vegetation card texture (alpha = coverage): grass (scattered over grass terrain), broadleaf / needle (tree foliage).",
 	"materials": {
 		"rock":         { "source": "ambientcg:Rock032",         "scale": 2, "relief": "rock" },
 		"deepslate":    { "source": "ambientcg:Rock031",         "scale": 2, "relief": "rock" },
@@ -21,6 +21,9 @@
 		"clay":         { "source": "ambientcg:Rock041",         "scale": 2, "relief": "soil" },
 		"sandstone":    { "source": "ambientcg:Rock055",         "scale": 2, "relief": "rock" },
 		"terracotta":   { "source": "ambientcg:Rock061",         "scale": 2, "relief": "rock" },
+		"grass_blades": { "source": "procedural:grass_blades", "scale": 1, "tinted": true, "card": "grass" },
+		"leaves_broad": { "source": "procedural:broad_leaves", "scale": 1, "tinted": true, "card": "broadleaf" },
+		"leaves_needle": { "source": "procedural:needle_leaves", "scale": 1, "tinted": true, "card": "needle" },
 		"end_stone":    { "source": "ambientcg:Rock054",         "scale": 2, "relief": "rock" }
 	},
 	"blocks": {

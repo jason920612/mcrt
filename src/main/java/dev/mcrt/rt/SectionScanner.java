@@ -210,11 +210,16 @@ final class SectionScanner {
 	static final int SHAPE_LOG_X = 2;   // logs: replaced by an octagonal trunk along the axis
 	static final int SHAPE_LOG_Y = 3;
 	static final int SHAPE_LOG_Z = 4;
+	static final int SHAPE_HIDDEN = 5;  // pixel-art grass plants: dropped; the terrain's grass cards replace them
+	static final int SHAPE_NEEDLES = 6; // conifer leaves: like SHAPE_LEAVES with needle foliage
 
 	private static int shapeOf(BlockState state) {
 		Block block = state.getBlock();
 		if (block instanceof net.minecraft.world.level.block.LeavesBlock) {
-			return SHAPE_LEAVES;
+			return block == Blocks.SPRUCE_LEAVES ? SHAPE_NEEDLES : SHAPE_LEAVES;
+		}
+		if (block == Blocks.SHORT_GRASS || block == Blocks.TALL_GRASS || block == Blocks.FERN || block == Blocks.LARGE_FERN) {
+			return SHAPE_HIDDEN;
 		}
 		if (block instanceof net.minecraft.world.level.block.RotatedPillarBlock) {
 			String id = BuiltInRegistries.BLOCK.getKey(block).getPath();
