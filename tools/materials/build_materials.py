@@ -89,7 +89,11 @@ def build_material(name: str, spec: dict, cache: Path, out: Path, size: int) -> 
             return Image.new(mode, (size, size), fill)
         return image.convert(mode).resize((size, size), Image.LANCZOS)
 
-    r, g, b = color.convert("RGB").resize((size, size), Image.LANCZOS).split()
+    base = color.convert("RGB").resize((size, size), Image.LANCZOS)
+    if "gain" in spec:
+        gained = np.asarray(base).astype(np.float32) * np.array(spec["gain"], dtype=np.float32)
+        base = Image.fromarray(gained.clip(0, 255).astype(np.uint8))
+    r, g, b = base.split()
     albedo = Image.merge("RGBA", (r, g, b, channel(height, fill=128)))
     nx, ny, _ = normal.convert("RGB").resize((size, size), Image.LANCZOS).split()
     normal_xy = Image.merge("RGB", (nx, ny, Image.new("L", (size, size), 0)))

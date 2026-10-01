@@ -1,5 +1,5 @@
 {
-	"_comment": "smooth = rendered as smoothed natural terrain (visual only); atlas = smoothed but textured with Minecraft's own block texture (ores). Material sources (all CC0 from ambientCG) and which Minecraft block faces use them. scale = blocks covered by one texture repeat. tinted = multiplied by the biome tint (normalized to plains grass). relief = how smoothed terrain of the material is sculpted (soil, rock, sand, snow). card = alpha-tested vegetation card texture (alpha = coverage): grass (scattered over grass terrain), broadleaf / needle (tree foliage).",
+	"_comment": "smooth = rendered as smoothed natural terrain (visual only); atlas = smoothed but textured with Minecraft's own block texture (ores). Material sources (all CC0 from ambientCG) and which Minecraft block faces use them. scale = blocks covered by one texture repeat. tinted = multiplied by the biome tint (normalized to plains grass). relief = how smoothed terrain of the material is sculpted (soil, rock, sand, snow). card = alpha-tested vegetation card texture (alpha = coverage): grass (scattered over grass terrain), broadleaf / needle (tree foliage). gain = rgb multiplier on the base color (ice photos are darker than ice seen from afar).",
 	"materials": {
 		"rock":         { "source": "ambientcg:Rock032",         "scale": 2, "relief": "rock" },
 		"deepslate":    { "source": "ambientcg:Rock031",         "scale": 2, "relief": "rock" },
@@ -21,6 +21,8 @@
 		"clay":         { "source": "ambientcg:Rock041",         "scale": 2, "relief": "soil" },
 		"sandstone":    { "source": "ambientcg:Rock055",         "scale": 2, "relief": "rock" },
 		"terracotta":   { "source": "ambientcg:Rock061",         "scale": 2, "relief": "rock" },
+		"ice":          { "source": "ambientcg:Ice004",          "scale": 7, "relief": "snow", "gain": [1.45, 1.6, 1.8] },
+		"packed_ice":   { "source": "ambientcg:Ice001",          "scale": 4, "relief": "rock", "gain": [1.3, 1.45, 1.7] },
 		"grass_blades": { "source": "procedural:grass_blades", "scale": 1, "tinted": true, "card": "grass" },
 		"leaves_broad": { "source": "procedural:broad_leaves", "scale": 1, "tinted": true, "card": "broadleaf" },
 		"leaves_needle": { "source": "procedural:needle_leaves", "scale": 1, "tinted": true, "card": "needle" },
@@ -42,6 +44,9 @@
 		"minecraft:stone_bricks":  { "all": "stone_bricks" },
 		"minecraft:bricks":        { "all": "bricks" },
 		"minecraft:snow_block":    { "all": "snow", "smooth": true },
+		"minecraft:ice":         { "all": "ice", "smooth": true },
+		"minecraft:packed_ice":  { "all": "packed_ice", "smooth": true },
+		"minecraft:blue_ice":    { "all": "packed_ice", "smooth": true },
 		"minecraft:snow":          { "all": "snow" },
 		"minecraft:powder_snow":   { "all": "snow" },
 		"minecraft:andesite":      { "all": "andesite", "smooth": true },

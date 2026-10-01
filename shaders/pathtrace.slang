@@ -962,7 +962,10 @@ void rayGen()
         }
         if (hit.hitT < 0.0)
         {
-            foreground += throughput * skyWithClouds(origin, dir, true);
+            // Under water, a ray heading down that meets nothing (a crack in the sea floor, or the
+            // far sea, which has no floor) ends in the deep: its scattering was added above.
+            if (!(fromWater && dir.y < 0.0))
+                foreground += throughput * skyWithClouds(origin, dir, true);
             break;
         }
 
